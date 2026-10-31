@@ -13,7 +13,8 @@ const MAX_BYTES := 64 * 1024 * 1024
 const INLINE_MAX_SIDE := 1568
 const INLINE_MAX_PNG_BYTES := 2 * 1024 * 1024
 const JPEG_QUALITY := 0.85
-const PROTECTED_DIR := "res://addons/godot_mcp/"
+# Above an 8K frame (33 MP); a decoded RGBA image this size is 256 MB.
+const MAX_PIXELS := 8192 * 8192
 
 static var _PNG_SIGNATURE := PackedByteArray([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
 static var _SCREENSHOT := RegEx.create_from_string("^scr-[0-9]+\\.png\\z")
@@ -22,8 +23,8 @@ static var _OWN := RegEx.create_from_string("^capture-([0-9]+)\\.png\\z")
 
 # {} when `path` may receive a capture, otherwise a tool failure.
 static func check_target(path: String) -> Dictionary:
-	if path.to_lower().begins_with(PROTECTED_DIR):
-		return ToolError.fail("PROTECTED_PATH", "Captures cannot be written under %s" % PROTECTED_DIR)
+	if path.to_lower().begins_with(ResPaths.PROTECTED_DIR):
+		return ToolError.fail("PROTECTED_PATH", "Captures cannot be written under %s" % ResPaths.PROTECTED_DIR)
 	return ResPaths.check_new_file(path, ["png"])
 
 
@@ -55,12 +56,13 @@ static func save(source: Variant, target: String, inline: bool) -> Dictionary:
 	var err := file.get_error()
 	file.close()
 	if err != OK:
+		DirAccess.remove_absolute(path)
 		return ToolError.fail("WRITE_FAILED", "Cannot write %s (%s)" % [path, error_string(err)])
 	err = DirAccess.remove_absolute(source)
 	if err != OK:
 		push_warning("godot_mcp: cannot remove the game's screenshot %s (%s)" % [source, error_string(err)])
 	if target == "":
-		_rotate()
+		_rotate(path.get_file())
 	var result := {
 		"path": path,
 		"absolutePath": ProjectSettings.globalize_path(path),
@@ -74,7 +76,7 @@ static func save(source: Variant, target: String, inline: bool) -> Dictionary:
 
 
 # D59: a regular file directly in the editor's temp folder, named scr-<digits>.png, not a link, at most
-# MAX_BYTES, starting with the PNG signature. Returns {bytes} or a tool failure.
+# MAX_BYTES, starting with the PNG signature, declaring at most MAX_PIXELS. Returns {bytes} or a tool failure.
 static func _read_screenshot(source: Variant) -> Dictionary:
 	if not source is String:
 		return _failed("The game's reply has no file path")
@@ -97,9 +99,19 @@ static func _read_screenshot(source: Variant) -> Dictionary:
 	if size > MAX_BYTES:
 		return _failed("%s is larger than %d bytes" % [source, MAX_BYTES])
 	var bytes := file.get_buffer(size)
-	if bytes.size() != size or bytes.slice(0, _PNG_SIGNATURE.size()) != _PNG_SIGNATURE:
+	# The signature, then the IHDR chunk (length 13), whose width and height are big-endian u32s.
+	if bytes.size() != size or size < 24 or bytes.slice(0, _PNG_SIGNATURE.size()) != _PNG_SIGNATURE or bytes.slice(12, 16).get_string_from_ascii() != "IHDR":
 		return _failed("%s is not a PNG file" % source)
+	var width := _u32_be(bytes, 16)
+	var height := _u32_be(bytes, 20)
+	# Checked before decoding: a small PNG can declare a frame that decodes to gigabytes.
+	if width * height > MAX_PIXELS:
+		return _failed("%s declares %dx%d pixels, over the %d-pixel limit" % [source, width, height, MAX_PIXELS])
 	return {"bytes": bytes}
+
+
+static func _u32_be(bytes: PackedByteArray, at: int) -> int:
+	return (bytes[at] << 24) | (bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]
 
 
 # A new res:// path in CAPTURE_DIR, or "" when the folder can't be made or a part of it is a link.
@@ -118,16 +130,23 @@ static func _new_capture_path() -> String:
 	return "%s/capture-%d.png" % [CAPTURE_DIR, stamp]
 
 
-# Keeps the newest KEEP captures this addon named in CAPTURE_DIR and deletes the rest.
-static func _rotate() -> void:
-	var stamps: Array[int] = []
+# Keeps the newest KEEP captures this addon named in CAPTURE_DIR, oldest stamp first out, and never
+# `written`, the one just saved.
+static func _rotate(written: String) -> void:
+	var owned: Array[Array] = []
 	for file in DirAccess.get_files_at(CAPTURE_DIR):
 		var found := _OWN.search(file)
 		if found != null:
-			stamps.append(found.get_string(1).to_int())
-	stamps.sort()
-	for stamp in stamps.slice(0, maxi(stamps.size() - KEEP, 0)):
-		var path := "%s/capture-%d.png" % [CAPTURE_DIR, stamp]
+			owned.append([found.get_string(1).to_int(), file])
+	owned.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+	var excess := owned.size() - KEEP
+	for entry in owned:
+		if excess <= 0:
+			break
+		if entry[1] == written:
+			continue
+		excess -= 1
+		var path := CAPTURE_DIR.path_join(entry[1])
 		var err := DirAccess.remove_absolute(path)
 		if err != OK:
 			push_warning("godot_mcp: cannot remove the old capture %s (%s)" % [path, error_string(err)])

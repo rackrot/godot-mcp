@@ -7,6 +7,8 @@ extends RefCounted
 const ToolError := preload("tool_error.gd")
 
 const MAX_PATH_CHARS := 4096
+# This addon's folder. Tools refuse to write into it (PROTECTED_PATH); compare lowercased.
+const PROTECTED_DIR := "res://addons/godot_mcp/"
 
 
 # The .csproj file names in the project root.

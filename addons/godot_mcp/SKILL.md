@@ -172,7 +172,7 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 | Editor log | 1,000 entries kept. `limit` up to 1,000. |
 | Diagnostics | 200 entries, 1,000 characters per line, 120,000 characters in all. |
 | Scene switch, play, and stop | 10 seconds each. |
-| Captures | `timeoutSec` 1 to 60, default 10. The game's file up to 64 MB. Inline images up to 1568 px on the long side. The newest 20 kept in the captures folder. |
+| Captures | `timeoutSec` 1 to 60, default 10. The game's file up to 64 MB and 64 megapixels. Inline images up to 1568 px on the long side. The newest 20 kept in the captures folder. |
 | Job timeouts | `run_headless` defaults to 60 seconds, `import_assets` to 120, `build_dotnet` to 300, and all cap at 540. |
 
 ## Jobs
@@ -200,7 +200,8 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 - The result is `{path, absolutePath, width, height, bytes}`, followed by an image block scaled to at most 1568 px on the long side. The image is PNG, or JPEG when the PNG would be over 2 MB. Pass `inline: false` to get only the file.
 - With nothing playing the call fails at once with `NO_GAME`. Right after `play_scene` it waits for the game's debugger to connect.
 - A game run with `--headless` has no renderer and can't answer, so the call ends with `CAPTURE_TIMEOUT`. Check `editor/run/main_run_args`. A game paused at a breakpoint doesn't answer either.
-- The game writes the PNG into the editor's temp folder and sends its path. A path that isn't a `scr-<digits>.png` file directly in that folder, is a link, or isn't a PNG gives `CAPTURE_FAILED`. A game on another machine or in a sandbox always gets it.
+- The game writes the PNG into the editor's temp folder and sends its path. A path that isn't a `scr-<digits>.png` file directly in that folder, is a link, or isn't a PNG gives `CAPTURE_FAILED`, as does a frame over 64 megapixels. A game on another machine or in a sandbox always gets `CAPTURE_FAILED`.
+- A reply that arrives after `CAPTURE_TIMEOUT` or `CANCELLED` is dropped, and the game's `scr-*.png` stays in the temp folder.
 
 ## Code runs in the editor
 

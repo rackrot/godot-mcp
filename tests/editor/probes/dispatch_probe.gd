@@ -80,7 +80,7 @@ func _content_blocks() -> void:
 	var text: Dictionary = JSON.parse_string(content[0]["text"])
 	_check("an image block follows the text block", content.size() == 2 and content[0]["type"] == "text" and content[1] == Fake.IMAGE and result["isError"] == false, JSON.stringify(reply))
 	_check("_content is not in structuredContent or the text", result["structuredContent"] == {"a": 1.0} and text == {"a": 1.0}, JSON.stringify(reply))
-	for tool_name: String in ["textblock", "badmime", "notarray"]:
+	for tool_name: String in ["textblock", "badmime", "notarray", "extrakey", "nonstring"]:
 		reply = await _call(mcp, tool_name)
 		result = reply["result"]
 		_check("a %s _content is INTERNAL" % tool_name, result["isError"] == true and result["structuredContent"]["error"]["code"] == "INTERNAL" and result["content"].size() == 1, JSON.stringify(reply))
@@ -225,6 +225,8 @@ class Fake:
 			{"name": "textblock", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": [{"type": "text", "text": "x"}]}},
 			{"name": "badmime", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": [{"type": "image", "data": "x", "mimeType": "image/gif"}]}},
 			{"name": "notarray", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": IMAGE}},
+			{"name": "extrakey", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": [{"type": "image", "data": "x", "mimeType": "image/png", "annotations": {}}]}},
+			{"name": "nonstring", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": [{"type": "image", "data": 5, "mimeType": "image/png"}]}},
 		]
 
 	# U+0001, U+000B and U+001B, a literal backslash then v, and a literal double backslash then v.

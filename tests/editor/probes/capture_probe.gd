@@ -20,7 +20,11 @@ func _initialize() -> void:
 	_custom_target()
 	_scaled_inline()
 	_jpeg_inline()
+	_pixel_cap()
+	_byte_cap()
 	_claims()
+	# Last: it leaves the captures folder a link.
+	_linked_folder()
 	for path in _made:
 		DirAccess.remove_absolute(path)
 	quit(1 if _failed else 0)
@@ -42,18 +46,27 @@ func _copy() -> void:
 	_check("the inline block is the PNG", block["type"] == "image" and block["mimeType"] == "image/png" and _decode(block).get_size() == Vector2i(4, 3), block["mimeType"])
 
 
-# D60: the newest 20 captures this addon named are kept; other files in the folder are left alone.
+# D60: the newest 20 captures this addon named are kept, by stamp and by their actual file names;
+# other files in the folder are left alone.
 func _rotation() -> void:
 	var dir := CaptureStore.CAPTURE_DIR
-	for file in DirAccess.get_files_at(dir):
-		DirAccess.remove_absolute(dir.path_join(file))
+	_clear(dir)
 	for stamp in range(1, 21):
-		_write(dir.path_join("capture-%d.png" % stamp), PackedByteArray([1]))
+		_write(dir.path_join("capture-%03d.png" % stamp), PackedByteArray([1]))
 	_write(dir.path_join("other.png"), PackedByteArray([1]))
 	var result := CaptureStore.save(_screenshot(_solid(2, 2)), "", false)
 	var files := DirAccess.get_files_at(dir)
-	var ok: bool = not result.has("error") and files.size() == 21 and "capture-1.png" not in files and "capture-2.png" in files and "other.png" in files and result["path"].get_file() in files
+	var ok: bool = not result.has("error") and files.size() == 21 and "capture-001.png" not in files and "capture-002.png" in files and "other.png" in files and result["path"].get_file() in files
 	_check("a 21st capture deletes the oldest", ok, str(files))
+	# Stamps ahead of the clock make the new capture the oldest; it must survive.
+	_clear(dir)
+	var future := 99999999999999
+	for i in 20:
+		_write(dir.path_join("capture-%d.png" % (future + i)), PackedByteArray([1]))
+	result = CaptureStore.save(_screenshot(_solid(2, 2)), "", false)
+	files = DirAccess.get_files_at(dir)
+	ok = not result.has("error") and files.size() == 20 and result["path"].get_file() in files and "capture-%d.png" % future not in files
+	_check("rotation never deletes the capture just written", ok, str(files))
 
 
 # D59: each bad reply path gives CAPTURE_FAILED and leaves the file where it is.
@@ -108,6 +121,38 @@ func _jpeg_inline() -> void:
 	_check("a capture whose PNG is over 2 MB is inlined as JPEG", png_bytes > CaptureStore.INLINE_MAX_PNG_BYTES and block.get("mimeType") == "image/jpeg", "png %d bytes, %s" % [png_bytes, block.get("mimeType")])
 
 
+# A small PNG whose header declares a huge frame is refused before it is decoded.
+func _pixel_cap() -> void:
+	var big := Image.create_empty(9000, 8000, false, Image.FORMAT_L8)
+	var source := _screenshot(big)
+	var result := CaptureStore.save(source, "", false)
+	_check("a PNG over the pixel cap is CAPTURE_FAILED and left alone", result.get("error", {}).get("code") == "CAPTURE_FAILED" and FileAccess.file_exists(source), JSON.stringify(result))
+
+
+func _byte_cap() -> void:
+	var source := _temp_name("scr-%d.png")
+	var file := FileAccess.open(source, FileAccess.WRITE)
+	file.store_buffer(_solid(2, 2).save_png_to_buffer())
+	file.resize(CaptureStore.MAX_BYTES + 1)
+	file.close()
+	var result := CaptureStore.save(source, "", false)
+	_check("a file over 64 MB is CAPTURE_FAILED and left alone", result.get("error", {}).get("code") == "CAPTURE_FAILED" and FileAccess.file_exists(source), JSON.stringify(result))
+
+
+# The captures folder as a link to another folder: the save is refused and nothing lands there.
+func _linked_folder() -> void:
+	var dir := CaptureStore.CAPTURE_DIR
+	_clear(dir)
+	DirAccess.remove_absolute(dir)
+	var elsewhere := _temp_name("captures-%d")
+	DirAccess.make_dir_absolute(elsewhere)
+	DirAccess.open("res://").create_link(elsewhere, ProjectSettings.globalize_path(dir))
+	var source := _screenshot(_solid(2, 2))
+	var result := CaptureStore.save(source, "", false)
+	var linked := DirAccess.open("res://").is_link(ProjectSettings.globalize_path(dir))
+	_check("a linked captures folder is refused and nothing is written there", linked and result.get("error", {}).get("code") == "WRITE_FAILED" and DirAccess.get_files_at(elsewhere).is_empty() and FileAccess.file_exists(source), JSON.stringify(result))
+
+
 # D58: only replies to this plugin's own requests are claimed. Every game_view message reaches it.
 func _claims() -> void:
 	var first := CaptureDebugger.FIRST_ID
@@ -127,6 +172,11 @@ func _refused(name: String, source: String) -> void:
 	var result := CaptureStore.save(source, "", false)
 	var still := FileAccess.file_exists(source) or DirAccess.dir_exists_absolute(source)
 	_check("%s is CAPTURE_FAILED and left alone" % name, exists and still and result.get("error", {}).get("code") == "CAPTURE_FAILED", JSON.stringify(result))
+
+
+func _clear(dir: String) -> void:
+	for file in DirAccess.get_files_at(dir):
+		DirAccess.remove_absolute(dir.path_join(file))
 
 
 func _solid(width: int, height: int) -> Image:
