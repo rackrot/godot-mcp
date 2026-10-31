@@ -15,7 +15,6 @@ const BOM := [0xEF, 0xBB, 0xBF]
 # @tool script already runs code, since the diagnostics load runs its static initializers. This stops
 # accidental edits of the server's own files, and validating them, which reloads the Script whose
 # functions are on the stack and crashes the editor.
-const PROTECTED_DIR := "res://addons/godot_mcp/"
 
 static var _IDENTIFIER := RegEx.create_from_string("^[A-Za-z_][A-Za-z0-9_]*\\z")
 
@@ -284,8 +283,8 @@ func _read(path: String) -> Dictionary:
 
 
 func _protected(path: String) -> Dictionary:
-	if path.to_lower().begins_with(PROTECTED_DIR):
-		return ToolError.fail("PROTECTED_PATH", "Scripts under %s cannot be written or validated through this tool" % PROTECTED_DIR)
+	if path.to_lower().begins_with(ResPaths.PROTECTED_DIR):
+		return ToolError.fail("PROTECTED_PATH", "Scripts under %s cannot be written or validated through this tool" % ResPaths.PROTECTED_DIR)
 	return {}
 
 

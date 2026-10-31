@@ -100,6 +100,7 @@ In a project with no `.csproj`, call `create_dotnet_project` first. It writes th
 | `stop_scene` | Stop the scene that is playing. | none |
 | `enable_plugin` | Enable the plugin in `res://addons/<name>/` in the open editor, and write `project.godot`. Returns `changed: false` if it was already enabled. A C# plugin needs `build_dotnet` first. | `name` (the folder under `addons/`, such as `marker` or `vendor/foo`; `get_project_info` lists them) |
 | `disable_plugin` | Disable that plugin and write `project.godot`. Returns `changed: false` if it was already disabled. Refuses `godot_mcp`. | `name` |
+| `capture_viewport` | Take a PNG of the running game's window and return it as an image. | `path` (a new `res://` `.png`), `inline` (default true), `timeoutSec` (default 10, 1 to 60) |
 
 ## Values
 
@@ -139,12 +140,15 @@ A tool failure returns `isError: true`, with `structuredContent.error` holding `
 | `SCENE_CYCLE` | `add_node` with `scene` would nest the edited scene inside itself. |
 | `INVALID_PATH` | A `res://` path failed a rule. It must start with `res://`, and it must be normalized, with no `..`, `\`, `:`, or control characters. It must not be under `res://.godot/`, pass through a symbolic link, or have a `.remap` file. |
 | `FILE_NOT_FOUND`, `FILE_EXISTS`, `DIR_NOT_FOUND` | The file is missing, the new file already exists, or its folder is missing. `build_dotnet` returns `FILE_NOT_FOUND` when the `.csproj` has been removed since the editor started. |
-| `PROTECTED_PATH`, `PROTECTED_SETTING` | Scripts under `addons/godot_mcp/` can't be written or validated, and `enable_plugin` and `disable_plugin` refuse `godot_mcp`. The `editor/`, `editor_plugins/`, `input/`, and `godot_mcp/` settings can't be set; use `enable_plugin` and `disable_plugin` for plugins and `add_input_action` for actions. |
+| `PROTECTED_PATH`, `PROTECTED_SETTING` | Scripts under `addons/godot_mcp/` can't be written or validated, `capture_viewport` can't write there, and `enable_plugin` and `disable_plugin` refuse `godot_mcp`. The `editor/`, `editor_plugins/`, `input/`, and `godot_mcp/` settings can't be set; use `enable_plugin` and `disable_plugin` for plugins and `add_input_action` for actions. |
 | `PLUGIN_FAILED` | The editor did not enable or disable the plugin, or its `plugin.cfg` can't be parsed or has no `script`. The message carries the errors the editor logged, such as a parse error in the plugin's script. A C# plugin script needs `build_dotnet` first. |
 | `NO_MATCH`, `AMBIGUOUS_MATCH` | `oldText` is absent, or occurs more than once. Add surrounding text so it matches once. `build_dotnet` returns `AMBIGUOUS_MATCH` when a second `.csproj` has appeared in the project root. |
 | `TOO_LARGE` | `oldText` is over 64 KB, or a script is over 1 MB. |
 | `UNSAVED_EDITOR_BUFFER` | The script editor holds unsaved changes to the file. Save or revert them in the editor. |
 | `SAVE_FAILED`, `WRITE_FAILED`, `READ_FAILED`, `LOAD_FAILED` | A disk or load problem. Read the message, and check `get_editor_log`. |
+| `NO_GAME` | `capture_viewport` found no running game. Start one with `play_scene`. |
+| `CAPTURE_TIMEOUT` | The game didn't answer within `timeoutSec`. It has no renderer when run with `--headless`, or it is paused at a breakpoint. |
+| `CAPTURE_FAILED` | The game's screenshot file failed a check (see Capture the running game), or isn't a readable PNG. |
 | `UNSAFE_AUTOSAVE` | `play_scene` would auto-save a scene that can't be saved safely. Fix that scene's save problem first. |
 | `PLAY_FAILED`, `STOP_FAILED`, `SCENE_SWITCH_TIMEOUT` | The editor didn't start, stop, or switch within 10 seconds. Check `get_editor_log`. |
 | `SPAWN_FAILED` | `run_headless` or `build_dotnet` couldn't start its process. The message names the cause: GNU `timeout` is not on `PATH`, or the editor's binary couldn't be started. A missing `dotnet` is not this code. It comes back as a `build_dotnet` result with `exitCode` 127 and a `BUILD_FAILED` diagnostic. |
@@ -158,7 +162,7 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 | --- | --- |
 | Request body | 1 MB. Headers 16 KB. |
 | Concurrency | One request runs at a time, in arrival order. Four connections at once; a fifth is closed. |
-| Execution | 30 seconds from queueing to answer. `run_headless` and `import_assets` set their own budget. |
+| Execution | 30 seconds from queueing to answer. `run_headless`, `import_assets` and `capture_viewport` set their own budget. |
 | Response | 4 MB. |
 | Scripts | 1 MB per read or write. `oldText` up to 64 KB. |
 | Literal values | 4,096 characters. |
@@ -168,6 +172,7 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 | Editor log | 1,000 entries kept. `limit` up to 1,000. |
 | Diagnostics | 200 entries, 1,000 characters per line, 120,000 characters in all. |
 | Scene switch, play, and stop | 10 seconds each. |
+| Captures | `timeoutSec` 1 to 60, default 10. The game's file up to 64 MB and 64 megapixels. Inline images up to 1568 px on the long side. The newest 20 kept in the captures folder. |
 | Job timeouts | `run_headless` defaults to 60 seconds, `import_assets` to 120, `build_dotnet` to 300, and all cap at 540. |
 
 ## Jobs
@@ -187,9 +192,20 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 - Use `play_scene` to show a scene in the editor, like F5 to F7 in the editor. It returns once the game has started. It does not capture output. It saves every modified scene first.
 - Use `stop_scene` to end a scene that `play_scene` started, or one a person started. `stopped` is false when nothing was playing.
 
+## Capture the running game
+
+`capture_viewport` asks the running game for a screenshot of its window, through the editor's debugger. It works for any debug run this editor started: `play_scene`, F5, or the embedded Game view. It does not capture `run_headless` runs or the editor itself.
+
+- The PNG goes to `res://.godot/godot_mcp/captures/capture-<unix ms>.png`, which is gitignored and never imported. The newest 20 are kept. Give `path` to write a new `res://` `.png` instead; the editor imports it.
+- The result is `{path, absolutePath, width, height, bytes}`, followed by an image block scaled to at most 1568 px on the long side. The image is PNG, or JPEG when the PNG would be over 2 MB. Pass `inline: false` to get only the file.
+- With nothing playing the call fails at once with `NO_GAME`. Right after `play_scene` it waits for the game's debugger to connect.
+- A game run with `--headless` has no renderer and can't answer, so the call ends with `CAPTURE_TIMEOUT`. Check `editor/run/main_run_args`. A game paused at a breakpoint doesn't answer either.
+- The game writes the PNG into the editor's temp folder and sends its path. A path that isn't a `scr-<digits>.png` file directly in that folder, is a link, or isn't a PNG gives `CAPTURE_FAILED`, as does a frame over 64 megapixels. A game on another machine or in a sandbox always gets `CAPTURE_FAILED`.
+- A reply that arrives after `CAPTURE_TIMEOUT` or `CANCELLED` is dropped, and the game's `scr-*.png` stays in the temp folder.
+
 ## Code runs in the editor
 
-Several tools also run project code. `validate_script` and the script writers run the static initializers of `@tool` scripts. A `@tool` script with a `_static_init` runs arbitrary code in the editor. `open_scene` runs the `@tool` scripts in the scenes it loads. `enable_plugin` runs the plugin's `_enter_tree` and `_enable_plugin`, and `disable_plugin` runs its `_disable_plugin` and `_exit_tree`. `get_node_properties` can run script getters. Setting a property can run a setter. `set_project_setting` changes autoloads and the main scene, which run when the game starts. `add_input_action` runs no project code. `run_headless` and `play_scene` run the game. `build_dotnet` runs the project's MSBuild targets, analyzers, and source generators.
+Several tools also run project code. `validate_script` and the script writers run the static initializers of `@tool` scripts. A `@tool` script with a `_static_init` runs arbitrary code in the editor. `open_scene` runs the `@tool` scripts in the scenes it loads. `enable_plugin` runs the plugin's `_enter_tree` and `_enable_plugin`, and `disable_plugin` runs its `_disable_plugin` and `_exit_tree`. `get_node_properties` can run script getters. Setting a property can run a setter. `set_project_setting` changes autoloads and the main scene, which run when the game starts. `add_input_action` runs no project code. `run_headless` and `play_scene` run the game. `capture_viewport` runs no project code beyond the game already running. `build_dotnet` runs the project's MSBuild targets, analyzers, and source generators.
 
 There is no sandbox. The bearer token is the only boundary. `addons/godot_mcp/` refuses script writes and validation with `PROTECTED_PATH`. That guards against accidents, not against a hostile caller. Use this server only with projects you trust.
 

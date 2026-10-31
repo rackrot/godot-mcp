@@ -1,6 +1,9 @@
 @tool
 extends RefCounted
 
+const CaptureDebugger := preload("../capture_debugger.gd")
+const CaptureStore := preload("../capture_store.gd")
+const JobTools := preload("job_tools.gd")
 const LogBuffer := preload("../log_buffer.gd")
 const Request := preload("../request.gd")
 const ResPaths := preload("../res_paths.gd")
@@ -16,12 +19,15 @@ var _log: LogBuffer
 var _job_active: Callable
 # This addon's own plugin.cfg: disabling it would free the plugin whose handler is on the stack (D51).
 var _own_cfg: String
+# Added to the editor's debugger by plugin.gd; sends and receives capture_viewport's requests (D58).
+var _capture: CaptureDebugger
 
 
-func _init(log: LogBuffer, job_active: Callable, own_cfg: String) -> void:
+func _init(log: LogBuffer, job_active: Callable, own_cfg: String, capture: CaptureDebugger) -> void:
 	_log = log
 	_job_active = job_active
 	_own_cfg = own_cfg
+	_capture = capture
 
 
 func tools() -> Array[Dictionary]:
@@ -82,6 +88,20 @@ func tools() -> Array[Dictionary]:
 				"additionalProperties": false,
 			},
 			"handler": disable_plugin,
+		},
+		{
+			"name": "capture_viewport",
+			"description": "Take a PNG of the running game's window: a game started by play_scene, or by a person pressing F5, including the editor's embedded Game view. Writes it to res://.godot/godot_mcp/captures/ (the newest 20 are kept), or to a new `path`, and returns the image inline unless `inline` is false. Fails with NO_GAME when nothing is playing. A game run with --headless (editor/run/main_run_args) has no renderer and times out with CAPTURE_TIMEOUT.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"path": {"type": "string", "description": "A new res:// .png file to write instead of the captures folder; the editor imports it."},
+					"inline": {"type": "boolean", "description": "Return the image as an MCP image block, scaled to at most 1568 px on the long side; default true."},
+					"timeoutSec": {"type": "integer", "minimum": 1, "maximum": 60, "description": "How long to wait for the game's reply; default 10."},
+				},
+				"additionalProperties": false,
+			},
+			"handler": capture_viewport,
 		},
 	]
 
@@ -178,6 +198,42 @@ func _set_plugin(name: String, enabled: bool) -> Variant:
 	if err != OK:
 		return ToolError.fail("SAVE_FAILED", "The plugin is %s in the editor, but project.godot could not be saved (%s)" % ["enabled" if enabled else "disabled", error_string(err)])
 	return {"name": name, "path": path, "enabled": enabled, "changed": true}
+
+
+# D59. Stays in the FIFO, so the update_file at the end is serialized with other editor-state tools.
+func capture_viewport(arguments: Dictionary, request: Request) -> Variant:
+	var path: String = arguments.get("path", "")
+	if arguments.has("path"):
+		var problem := CaptureStore.check_target(path)
+		if not problem.is_empty():
+			return problem
+	var timeout_ms := int(arguments.get("timeoutSec", 10)) * 1000
+	request.extend_budget(timeout_ms + JobTools.BUDGET_SLACK_MS)
+	if not EditorInterface.is_playing_scene() and _capture.active_session() == null:
+		return ToolError.fail("NO_GAME", "No game is running; start one with play_scene")
+	var deadline := Time.get_ticks_msec() + timeout_ms
+	var id := -1
+	# The debugger connects shortly after play_scene returns, so wait for a session, then for the reply.
+	while true:
+		if id == -1:
+			id = _capture.request()
+		elif _capture.reply(id) != null:
+			break
+		if not EditorInterface.is_playing_scene() and _capture.active_session() == null:
+			_capture.forget(id)
+			return ToolError.fail("NO_GAME", "The game stopped before it answered")
+		if Time.get_ticks_msec() >= deadline:
+			_capture.forget(id)
+			return ToolError.fail("CAPTURE_TIMEOUT", "The game did not answer within %d s. A game run with --headless (see the editor/run/main_run_args setting) has no renderer, and a game paused at a breakpoint does not answer." % (timeout_ms / 1000))
+		if not await request.next_frame():
+			_capture.forget(id)
+			return ToolError.fail("CANCELLED", "The request was cancelled")
+	var data: Array = _capture.reply(id)
+	_capture.forget(id)
+	var result := CaptureStore.save(data[3], path, arguments.get("inline", true))
+	if not result.has("error") and path != "":
+		EditorInterface.get_resource_filesystem().update_file(path)
+	return result
 
 
 # Waits for is_playing_scene() to become `playing`. False on timeout or cancellation.

@@ -32,6 +32,13 @@ const expected = [
   "the stalled peer is closed at the write deadline",
   "a queued request gets 500 at the deadline",
   "the queued request never started",
+  "an image block follows the text block",
+  "_content is not in structuredContent or the text",
+  "a textblock _content is INTERNAL",
+  "a badmime _content is INTERNAL",
+  "a notarray _content is INTERNAL",
+  "a extrakey _content is INTERNAL",
+  "a nonstring _content is INTERNAL",
 ];
 
 const results = new Map<string, { ok: boolean; detail: string }>();
