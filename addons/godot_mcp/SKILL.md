@@ -12,13 +12,13 @@ The `godot-editor` server is the open Godot editor, serving one project. Its too
 ## Start
 
 1. Call `get_project_info`. It returns the project name, main scene, features, autoloads, `plugins` (each `{name, enabled, version}`), `dotnet`, open and unsaved scenes, the playing scene, and `jobActive`. `dotnet` is `{csproj: "res://X.csproj"}` for one root csproj, `{csproj: null, count: N}` for several, and `null` for none. `build_dotnet` works only in the first case.
-2. If `jobActive` is true, wait before you call `run_headless`, `import_assets`, or `build_dotnet`. Otherwise the call fails with `PROJECT_BUSY`.
+2. If `jobActive` is true, wait before you call `run_headless`, `import_assets`, `build_dotnet`, or `install_asset`. Otherwise the call fails with `PROJECT_BUSY`.
 
 ## Know where a change lives
 
 - Node edits (`add_node`, `delete_node`, `move_node`, `update_property`) change the edited scene in the editor. Each is one undo step. None of them reaches disk until `save_scene` succeeds.
 - `create_scene` writes its new `.tscn` at once. `open_scene` only switches scenes.
-- Script writes (`create_script`, `edit_script`), `set_project_setting`, `add_input_action`, `enable_plugin` and `disable_plugin` write files at once.
+- Script writes (`create_script`, `edit_script`), `set_project_setting`, `add_input_action`, `enable_plugin`, `disable_plugin` and `install_asset` write files at once.
 - `run_headless` and `read_script` read files on disk. Save first, or the run uses the old content. `run_headless` lists the scenes still unsaved in `unsavedScenes`.
 
 ## Edit a scene
@@ -51,6 +51,20 @@ For C#, give `create_script` a `.cs` path. The file name must be an identifier, 
 ## Add assets
 
 After you add or change images, models, or audio, call `import_assets` before `run_headless` or `play_scene`. It rescans the project and returns `errorCount`, `warningCount`, and `diagnostics` for the import.
+
+## Install an addon from the Asset Library
+
+`install_asset` downloads an addon by its Asset Library id (the number in `godotengine.org/asset-library/asset/<id>`), installs the archive's `addons/` folders into `res://addons/`, and rescans. It never enables a plugin: call `enable_plugin` with a name from `plugins` afterwards.
+
+- Only the asset's current version is offered. `version` must equal it, or the call fails with `VERSION_MISMATCH`. `sha256` (64 hex digits) must match the download, or it fails with `HASH_MISMATCH`. The result always reports the download's `sha256`, so pin it on a later install. Some assets download a moving branch, so the same version can bring different code.
+- Downloads go only over https on port 443 to `github.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `objects.githubusercontent.com`, and `gitlab.com`. Every redirect is checked before it connects. Anything else is `UNTRUSTED_SOURCE`. In the editor's offline network mode the call fails with `NETWORK_OFFLINE`. The editor's HTTP proxy settings apply.
+- The record must be an addon for this Godot major version (`INCOMPATIBLE_ASSET`). A newer minor version adds a warning.
+- Only the `addons/` folder, at the archive root or under its one top folder, is installed, one addon per folder in it. `project.godot`, `override.cfg`, demos, and files directly in `addons/` are never written. An archive with no `addons/` folder is `INCOMPATIBLE_ASSET`. An addon named `godot_mcp` is `PROTECTED_PATH`.
+- The archive is checked before anything is extracted. Unsafe names, links, encryption, zip64, case-colliding names, or sizes over the limits give `ZIP_UNSAFE`, and nothing is written.
+- An archive with native code (`.gdextension`, `.gdnlib`, `.so`, `.dll`, `.dylib`, `.a`, `.wasm`, `.framework`) is refused with `NATIVE_CODE`, even with `allowNativeCode: true`. Loading a new GDExtension reloads every editor script, which would cancel the call. Install such an asset by hand in the editor.
+- An existing `res://addons/<name>` gives `FILE_EXISTS`. With `overwrite: true` the old folder moves to `res://.godot/godot_mcp/backups/<name>-<ms>/` (listed in `backups`; the newest 5 are kept), and the new one takes its place. A plugin under it that is enabled gives `PLUGIN_ENABLED`; call `disable_plugin` first.
+- `needsDotnetBuild` is true when the addon has `.cs` files. Call `build_dotnet` before you enable it.
+- The result also holds `title`, `license`, `versionString`, `godotVersion`, `finalUrl`, `bytes`, `addons`, `files`, `warnings`, and the scan's `diagnostics`, `errorCount`, and `warningCount`. `ok` is false when the scan logged an error.
 
 ## Build C#
 
@@ -95,6 +109,7 @@ In a project with no `.csproj`, call `create_dotnet_project` first. It writes th
 | `import_assets` | Rescan the project and import new or changed assets. | `timeoutSec` (default 120, max 540) |
 | `create_dotnet_project` | Write the root `.csproj` and the `.sln`, as Create C# solution does. Refuses an existing one. | `targetFramework` (default `net8.0`) |
 | `build_dotnet` | Build the root `.csproj` with `dotnet build`. Needs exactly one in the root. | `configuration` (default `Debug`; only Debug refreshes what the editor and `run_headless` use), `timeoutSec` (default 300, max 540) |
+| `install_asset` | Download an addon from the Asset Library by id and install its `addons/` folders. Never enables plugins. | `assetId`, `version`, `sha256`, `overwrite`, `allowNativeCode` (not honored yet), `timeoutSec` (default 120, max 540) |
 | `get_editor_log` | Read the editor's errors, warnings, and printed output. | `since`, `level`, `limit` (default 200, max 1000) |
 | `play_scene` | Run a scene in the editor's play mode. Output is not captured. | `mode` (`main`, `current`, or `custom`), `path` for `custom` |
 | `stop_scene` | Stop the scene that is playing. | none |
@@ -125,9 +140,9 @@ A tool failure returns `isError: true`, with `structuredContent.error` holding `
 
 | Code | Meaning and fix |
 | --- | --- |
-| `PROJECT_BUSY` | A `run_headless`, `import_assets`, or `build_dotnet` job is running. `play_scene` also gets it while a job runs, because playing starts the editor's own build. Retry when `jobActive` is false. |
+| `PROJECT_BUSY` | A `run_headless`, `import_assets`, `build_dotnet`, or `install_asset` job is running. `play_scene` also gets it while a job runs, because playing starts the editor's own build. Retry when `jobActive` is false. |
 | `IMPORT_IN_PROGRESS` | The editor was still importing when the run's deadline passed. Retry, or call `import_assets` first. |
-| `CANCELLED` | The request was cancelled. A cancelled run is killed. A cancelled import keeps running in the editor. |
+| `CANCELLED` | The request was cancelled. A cancelled run is killed. A cancelled import keeps running in the editor. A cancelled `install_asset` stops its download and installs nothing, unless the addon was already in place, which the message says. |
 | `NO_SCENE` | Call `open_scene` or `create_scene`. |
 | `NODE_NOT_FOUND`, `PROPERTY_NOT_FOUND` | Check the path with `get_scene_tree`, or the property name with `get_node_properties`. |
 | `INVALID_VALUE`, `UNSUPPORTED_TYPE` | The value doesn't fit the declared type. See Values. For `add_input_action`, an event is malformed or names an unknown key, modifier, or button; the message names `events[i]`. |
@@ -139,11 +154,19 @@ A tool failure returns `isError: true`, with `structuredContent.error` holding `
 | `INVALID_TYPE` | `add_node` got a class that is unknown, abstract, editor-only, or not a Node. |
 | `SCENE_CYCLE` | `add_node` with `scene` would nest the edited scene inside itself. |
 | `INVALID_PATH` | A `res://` path failed a rule. It must start with `res://`, and it must be normalized, with no `..`, `\`, `:`, or control characters. It must not be under `res://.godot/`, pass through a symbolic link, or have a `.remap` file. |
-| `FILE_NOT_FOUND`, `FILE_EXISTS`, `DIR_NOT_FOUND` | The file is missing, the new file already exists, or its folder is missing. `build_dotnet` returns `FILE_NOT_FOUND` when the `.csproj` has been removed since the editor started. |
-| `PROTECTED_PATH`, `PROTECTED_SETTING` | Scripts under `addons/godot_mcp/` can't be written or validated, `capture_viewport` can't write there, and `enable_plugin` and `disable_plugin` refuse `godot_mcp`. The `editor/`, `editor_plugins/`, `input/`, and `godot_mcp/` settings can't be set; use `enable_plugin` and `disable_plugin` for plugins and `add_input_action` for actions. |
+| `FILE_NOT_FOUND`, `FILE_EXISTS`, `DIR_NOT_FOUND` | The file is missing, the new file already exists, or its folder is missing. `build_dotnet` returns `FILE_NOT_FOUND` when the `.csproj` has been removed since the editor started. `install_asset` returns `FILE_EXISTS` for an existing addon folder; pass `overwrite`. |
+| `PROTECTED_PATH`, `PROTECTED_SETTING` | Scripts under `addons/godot_mcp/` can't be written or validated, `capture_viewport` can't write there, `enable_plugin` and `disable_plugin` refuse `godot_mcp`, and `install_asset` refuses an archive holding `addons/godot_mcp`. The `editor/`, `editor_plugins/`, `input/`, and `godot_mcp/` settings can't be set; use `enable_plugin` and `disable_plugin` for plugins and `add_input_action` for actions. |
 | `PLUGIN_FAILED` | The editor did not enable or disable the plugin, or its `plugin.cfg` can't be parsed or has no `script`. The message carries the errors the editor logged, such as a parse error in the plugin's script. A C# plugin script needs `build_dotnet` first. |
 | `NO_MATCH`, `AMBIGUOUS_MATCH` | `oldText` is absent, or occurs more than once. Add surrounding text so it matches once. `build_dotnet` returns `AMBIGUOUS_MATCH` when a second `.csproj` has appeared in the project root. |
-| `TOO_LARGE` | `oldText` is over 64 KB, or a script is over 1 MB. |
+| `TOO_LARGE` | `oldText` is over 64 KB, or a script is over 1 MB. An `install_asset` download is over 64 MiB, or the Asset Library's answer is over 1 MB. |
+| `NETWORK_OFFLINE` | The editor is in offline mode. Set Editor Settings > Network > Connection > Network Mode to Online. |
+| `UNTRUSTED_SOURCE` | The asset's download URL, or a redirect, is not https on port 443 to an allowed host. See Install an addon. |
+| `DOWNLOAD_FAILED` | The Asset Library or the download host failed, answered with an HTTP error, redirected more than 5 times, or timed out. An unknown asset id gives this too. |
+| `HASH_MISMATCH`, `VERSION_MISMATCH` | The download doesn't match `sha256` or the record's SHA-256 `download_hash`, or `version` is not the asset's current version. |
+| `INCOMPATIBLE_ASSET` | The asset is not an addon, is for another Godot major version, or its archive has no `addons/` folder. |
+| `ZIP_UNSAFE` | The archive has an unsafe entry name, a link, encryption, zip64, names that collide when lowercased, or sizes over the limits. Nothing was written. |
+| `NATIVE_CODE` | The archive holds native code. `install_asset` doesn't install it; install the asset by hand in the editor. |
+| `PLUGIN_ENABLED` | `install_asset` with `overwrite` would replace an enabled plugin. Call `disable_plugin` first. |
 | `UNSAVED_EDITOR_BUFFER` | The script editor holds unsaved changes to the file. Save or revert them in the editor. |
 | `SAVE_FAILED`, `WRITE_FAILED`, `READ_FAILED`, `LOAD_FAILED` | A disk or load problem. Read the message, and check `get_editor_log`. |
 | `NO_GAME` | `capture_viewport` found no running game. Start one with `play_scene`. |
@@ -173,18 +196,20 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 | Diagnostics | 200 entries, 1,000 characters per line, 120,000 characters in all. |
 | Scene switch, play, and stop | 10 seconds each. |
 | Captures | `timeoutSec` 1 to 60, default 10. The game's file up to 64 MB and 64 megapixels. Inline images up to 1568 px on the long side. The newest 20 kept in the captures folder. |
-| Job timeouts | `run_headless` defaults to 60 seconds, `import_assets` to 120, `build_dotnet` to 300, and all cap at 540. |
+| Job timeouts | `run_headless` defaults to 60 seconds, `import_assets` and `install_asset` to 120, `build_dotnet` to 300, and all cap at 540. |
+| Asset installs | Asset Library answer 1 MB. Download 64 MiB. At most 5 redirects. Archive: 20,000 entries, 64 MiB per file, 256 MiB in all, and a file over 1 MiB may not declare more than 100 times its compressed size. |
 
 ## Jobs
 
-- `run_headless`, `import_assets`, and `build_dotnet` are jobs. Only one job runs at a time, and a second one gets `PROJECT_BUSY` at once.
+- `run_headless`, `import_assets`, `build_dotnet`, and `install_asset` are jobs. Only one job runs at a time, and a second one gets `PROJECT_BUSY` at once.
 - `run_headless` waits for a running import first. It uses its own `timeoutSec`. When the time runs out, Godot's process group is killed, and the result has `timedOut: true` and `exitCode: null`.
 - `run_headless` returns `stdoutTail` and `stderrTail`, which are the ends of each stream. `truncated` is true when output was cut.
 - A game killed by signal N reports `exitCode` N, the same as `exit(N)`, so the exit code alone can't tell them apart.
 - A game that reads stdin waits for the timeout, because its stdin never closes.
 - `import_assets` holds the request queue, so other editor tools wait behind it and fail after 30 seconds. `run_headless` lets them run meanwhile, except `play_scene`.
 - `build_dotnet` returns `outputTail`, the end of the raw build output, with stderr last. On a timeout its process group is killed, and the result has `timedOut: true` and `exitCode: null`. Like `run_headless`, it lets other tools run meanwhile, except `play_scene`.
-- A cancelled request stops waiting. Cancelling a `run_headless` or `build_dotnet` kills its child process.
+- `install_asset` lets other tools run during its download, except `play_scene`. Its final scan is the same scan `import_assets` runs.
+- A cancelled request stops waiting. Cancelling a `run_headless` or `build_dotnet` kills its child process. Cancelling an `install_asset` stops its download and removes what it staged.
 
 ## Run and play
 
@@ -205,7 +230,7 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 
 ## Code runs in the editor
 
-Several tools also run project code. `validate_script` and the script writers run the static initializers of `@tool` scripts. A `@tool` script with a `_static_init` runs arbitrary code in the editor. `open_scene` runs the `@tool` scripts in the scenes it loads. `enable_plugin` runs the plugin's `_enter_tree` and `_enable_plugin`, and `disable_plugin` runs its `_disable_plugin` and `_exit_tree`. `get_node_properties` can run script getters. Setting a property can run a setter. `set_project_setting` changes autoloads and the main scene, which run when the game starts. `add_input_action` runs no project code. `run_headless` and `play_scene` run the game. `capture_viewport` runs no project code beyond the game already running. `build_dotnet` runs the project's MSBuild targets, analyzers, and source generators.
+Several tools also run project code. `validate_script` and the script writers run the static initializers of `@tool` scripts. A `@tool` script with a `_static_init` runs arbitrary code in the editor. `open_scene` runs the `@tool` scripts in the scenes it loads. `enable_plugin` runs the plugin's `_enter_tree` and `_enable_plugin`, and `disable_plugin` runs its `_disable_plugin` and `_exit_tree`. `get_node_properties` can run script getters. Setting a property can run a setter. `set_project_setting` changes autoloads and the main scene, which run when the game starts. `add_input_action` runs no project code. `run_headless` and `play_scene` run the game. `capture_viewport` runs no project code beyond the game already running. `build_dotnet` runs the project's MSBuild targets, analyzers, and source generators. `install_asset` brings remote code into the project: its `@tool` scripts run when a scene that uses them opens, its plugin runs when you enable it, and its C# compiles into the game at the next build. The checks on sources, archives, and paths are not a sandbox.
 
 There is no sandbox. The bearer token is the only boundary. `addons/godot_mcp/` refuses script writes and validation with `PROTECTED_PATH`. That guards against accidents, not against a hostile caller. Use this server only with projects you trust.
 
