@@ -2,6 +2,7 @@
 extends RefCounted
 
 const DotnetProject := preload("../dotnet_project.gd")
+const InputEvents := preload("../input_events.gd")
 const Request := preload("../request.gd")
 const ToolError := preload("../tool_error.gd")
 const ResPaths := preload("../res_paths.gd")
@@ -10,10 +11,18 @@ const ValueDecoder := preload("../value_decoder.gd")
 
 const PLUGIN_DEPTH := 3
 const MAX_PLUGINS := 200
-const PROTECTED_PREFIXES: Array[String] = ["editor/", "editor_plugins/", "godot_mcp/"]
+const DEFAULT_DEADZONE := 0.2
+const PROTECTED_PREFIXES: Array[String] = ["editor/", "editor_plugins/", "godot_mcp/", "input/"]
+# Where to send the caller instead, for the protected prefixes that have a tool of their own.
+const PROTECTED_HINTS := {
+	"editor_plugins/": "use enable_plugin or disable_plugin",
+	"input/": "use add_input_action",
+}
 
 static var TARGET_FRAMEWORK := RegEx.create_from_string("^net(\\d+)\\.\\d+\\z")
 static var NAME_PATTERN := RegEx.create_from_string("^[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)+\\z")
+# What the editor's Input Map tab refuses (/ : " = \), plus control characters; edge whitespace is checked apart.
+static var ACTION_NAME := RegEx.create_from_string("^[^/:\"=\\\\\\x00-\\x1f\\x7f]{1,128}\\z")
 
 var _addon_version: String
 # func() -> bool: whether a job (run_headless, import_assets) is running.
@@ -63,7 +72,7 @@ func tools() -> Array[Dictionary]:
 		},
 		{
 			"name": "set_project_setting",
-			"description": "Set one project setting and write project.godot, e.g. application/run/main_scene or an autoload. The value is parsed by the setting's declared type, as in update_property; a new setting takes bool, number, string, array or object. Settings under `editor/`, `editor_plugins/` (use enable_plugin and disable_plugin) and `godot_mcp/` are refused. `application/run/main_scene` and `autoload/*` must name an existing scene or script by res:// path or uid:// (a uid is resolved and its path checked), and a string value must not contain control characters. Some settings, autoloads included, apply only after the editor restarts.",
+			"description": "Set one project setting and write project.godot, e.g. application/run/main_scene or an autoload. The value is parsed by the setting's declared type, as in update_property; a new setting takes bool, number, string, array or object. Settings under `editor/`, `editor_plugins/` (use enable_plugin and disable_plugin), `input/` (use add_input_action) and `godot_mcp/` are refused. `application/run/main_scene` and `autoload/*` must name an existing scene or script by res:// path or uid:// (a uid is resolved and its path checked), and a string value must not contain control characters. Some settings, autoloads included, apply only after the editor restarts.",
 			"inputSchema": {
 				"type": "object",
 				"properties": {
@@ -74,6 +83,22 @@ func tools() -> Array[Dictionary]:
 				"additionalProperties": false,
 			},
 			"handler": set_project_setting,
+		},
+		{
+			"name": "add_input_action",
+			"description": "Write an input action to project.godot, as the Input Map tab does, so a game started by run_headless or play_scene sees it with no restart. Replaces the action's events by default and keeps its deadzone unless one is given; `append` adds only events it does not already have. `events: []` empties the action. An event is a string in Godot's key syntax, which means a physical key: \"Ctrl+P\", \"F1\", \"Alt+1\". Or an object: {type: \"key\", key: \"P\", modifiers?: [\"Ctrl\"], physical?: true}, {type: \"mouseButton\", button: left|right|middle|wheelUp|wheelDown|wheelLeft|wheelRight|extra1|extra2, modifiers?}, {type: \"joypadButton\", button: 0-127}. Modifiers are Ctrl, Shift, Alt, Meta and CmdOrCtrl, each at most once. Every object takes `device` (default -1, all devices). Returns the stored events and the previous ones in this shape; `previous` is null for a new action. The editor's own input map is not changed, so editor shortcuts are unaffected.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"name": {"type": "string", "minLength": 1, "description": "The action name, such as \"debug_toggle\" or \"ui_accept\". Not / : \" = \\."},
+					"events": {"type": "array", "maxItems": 32, "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}, "description": "At most 32 events."},
+					"deadzone": {"type": "number", "minimum": 0, "maximum": 1, "description": "Default 0.2 for a new action; an existing action keeps its own."},
+					"append": {"type": "boolean", "description": "Add to the action's events instead of replacing them. Default false."},
+				},
+				"required": ["name", "events"],
+				"additionalProperties": false,
+			},
+			"handler": add_input_action,
 		},
 		{
 			"name": "install_agent_skill",
@@ -230,9 +255,8 @@ func set_project_setting(arguments: Dictionary, _request: Request) -> Variant:
 	# editor/ holds the play-mode command line (main_run_args), which can write outside the project.
 	for prefix in PROTECTED_PREFIXES:
 		if lower.begins_with(prefix):
-			if prefix == "editor_plugins/":
-				return ToolError.fail("PROTECTED_SETTING", name + " cannot be changed through this tool; use enable_plugin or disable_plugin")
-			return ToolError.fail("PROTECTED_SETTING", name + " cannot be changed through this tool")
+			var hint: String = PROTECTED_HINTS.get(prefix, "")
+			return ToolError.fail("PROTECTED_SETTING", name + " cannot be changed through this tool" + ("; " + hint if hint != "" else ""))
 	var raw: Variant = arguments["value"]
 	var problem := _path_problem(name, raw)
 	if not problem.is_empty():
@@ -260,6 +284,54 @@ func set_project_setting(arguments: Dictionary, _request: Request) -> Variant:
 		"previous": ValueCodec.encode(previous) if known else null,
 		"value": ValueCodec.encode(ProjectSettings.get_setting(name)),
 	}
+
+
+# D54-D56. Writes input/<name> as {deadzone, events}, the form the Input Map tab writes. The editor's own
+# InputMap is left alone: the editor runs the default map, and a game reads project.godot when it starts.
+func add_input_action(arguments: Dictionary, _request: Request) -> Variant:
+	var name: String = arguments["name"]
+	if ACTION_NAME.search(name) == null or name != name.strip_edges():
+		return ToolError.fail("INVALID_NAME", "name must be 1 to 128 characters, with no / : \" = \\ or control characters, and no space at either end")
+	var raw_events: Array = arguments["events"]
+	if raw_events.size() > InputEvents.MAX_EVENTS:
+		return ToolError.fail("INVALID_VALUE", "events holds %d entries; the limit is %d" % [raw_events.size(), InputEvents.MAX_EVENTS])
+	var parsed := InputEvents.parse(raw_events)
+	if parsed.has("error"):
+		return parsed
+	var setting := "input/" + name
+	var created := not ProjectSettings.has_setting(setting)
+	var previous: Variant = null if created else ProjectSettings.get_setting(setting)
+	var old: Dictionary = previous if previous is Dictionary else {}
+	var old_events: Array = old["events"] if old.get("events") is Array else []
+	var old_deadzone: float = old["deadzone"] if old.get("deadzone") is float else DEFAULT_DEADZONE
+	var deadzone: float = float(arguments["deadzone"]) if arguments.has("deadzone") else old_deadzone
+	var events: Array = old_events.duplicate() if arguments.get("append", false) else []
+	for event: InputEvent in parsed["events"]:
+		if not events.any(func(existing: Variant) -> bool: return InputEvents.same(existing, event)):
+			events.append(event)
+	ProjectSettings.set_setting(setting, {"deadzone": deadzone, "events": events})
+	var err := ProjectSettings.save()
+	if err != OK:
+		ProjectSettings.set_setting(setting, previous)
+		return ToolError.fail("SAVE_FAILED", "Could not write project.godot (%s)" % error_string(err))
+	return {
+		"name": name,
+		"created": created,
+		"deadzone": deadzone,
+		"events": events.map(InputEvents.encode),
+		"previous": null if created else {"deadzone": old_deadzone, "events": old_events.map(InputEvents.encode)},
+		"editorRefreshed": _refresh_input_map_editor(),
+	}
+
+
+# The Input Map tab builds its list when the dialog opens, so it stays stale, and a later edit there would
+# write its stale copy back. _update_action_map_editor is internal (A20): a missing method is not an error.
+func _refresh_input_map_editor() -> bool:
+	for dialog in EditorInterface.get_base_control().find_children("*", "ProjectSettingsEditor", true, false):
+		if dialog.has_method("_update_action_map_editor"):
+			dialog.call("_update_action_map_editor")
+			return true
+	return false
 
 
 # The declared type of a setting that does not exist yet: whatever the JSON value is.
