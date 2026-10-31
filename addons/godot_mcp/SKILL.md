@@ -18,7 +18,7 @@ The `godot-editor` server is the open Godot editor, serving one project. Its too
 
 - Node edits (`add_node`, `delete_node`, `move_node`, `update_property`) change the edited scene in the editor. Each is one undo step. None of them reaches disk until `save_scene` succeeds.
 - `create_scene` writes its new `.tscn` at once. `open_scene` only switches scenes.
-- Script writes (`create_script`, `edit_script`) and `set_project_setting` write files at once.
+- Script writes (`create_script`, `edit_script`), `set_project_setting`, `add_input_action`, `enable_plugin` and `disable_plugin` write files at once.
 - `run_headless` and `read_script` read files on disk. Save first, or the run uses the old content. `run_headless` lists the scenes still unsaved in `unsavedScenes`.
 
 ## Edit a scene
@@ -37,6 +37,16 @@ The `godot-editor` server is the open Godot editor, serving one project. Its too
 4. After a later change, `edit_script` returns diagnostics too. Call `validate_script` to recheck a file alone.
 
 For C#, give `create_script` a `.cs` path. The file name must be an identifier, because it names the class. The tool writes `using Godot;`, an optional file-scoped `namespace` (`namespace: "Game.Actors"`), and `public partial class <file name> : <extends>`, with `content` as the class body. Give `content` unindented, since each non-empty line gets four spaces, including lines inside multi-line string literals. For `.cs`, give `extends` in its C# spelling, which the engine renames for some classes (`GodotObject`, `GpuParticles2D`, `HttpRequest`). It is written as given, and `build_dotnet` reports a wrong name. `className` is refused for `.cs`, and `namespace` for `.gd`. A `.cs` write returns `diagnostics: []` and a `note`, because only `build_dotnet` finds C# errors. `validate_script` is `.gd` only.
+
+## Add an input action
+
+`add_input_action` writes `input/<name>` to `project.godot`, as the editor's Input Map tab does. A game started by `run_headless` or `play_scene` reads it at start, so no restart is needed. The editor's own input map is not changed, so editor shortcuts stay as they were.
+
+- An event is a string in Godot's key syntax, which means a physical key: `"Ctrl+P"`, `"F1"`, `"Alt+1"`. Or an object: `{type: "key", key: "P", modifiers: ["Ctrl"], physical: true}`, `{type: "mouseButton", button: "right", modifiers: ["Shift"]}`, `{type: "joypadButton", button: 0}`. `physical: false` binds the key by its layout character instead of its position. `device` defaults to -1, every device.
+- Modifiers are `Ctrl`, `Shift`, `Alt`, `Meta` and `CmdOrCtrl` (Ctrl, or Command on macOS), any case, each at most once. An unknown modifier, key name or button is `INVALID_VALUE` naming `events[i]`. At most 32 events.
+- The events replace the action's old ones, and a new action gets deadzone 0.2. An existing action keeps its deadzone unless you give one. With `append: true` only events the action lacks are added, so a repeat changes nothing. `events: []` empties an action. Removing one is not supported.
+- The result holds `events` and `previous` (`null` for a new action) in the same shape. An event that shape can't express comes back as `{type: "other", text}`. `editorRefreshed` is whether the open Project Settings dialog was told to reload its Input Map tab.
+- Existing events are only reported as `previous` when you replace them; `get_project_settings` shows an event as `{class, type: "Object", value: null}`. `set_project_setting` refuses `input/`.
 
 ## Add assets
 
@@ -65,7 +75,8 @@ In a project with no `.csproj`, call `create_dotnet_project` first. It writes th
 | --- | --- | --- |
 | `get_project_info` | Read the project, editor, and job state. Call first. | none |
 | `get_project_settings` | Read settings with their defaults, sorted by name. | `prefix`, `limit` (default 500, max 5000) |
-| `set_project_setting` | Write a setting to `project.godot`. Refuses `editor/`, `editor_plugins/` (use `enable_plugin` and `disable_plugin`), and `godot_mcp/`. | `name`, `value` |
+| `set_project_setting` | Write a setting to `project.godot`. Refuses `editor/`, `editor_plugins/` (use `enable_plugin` and `disable_plugin`), `input/` (use `add_input_action`), and `godot_mcp/`. | `name`, `value` |
+| `add_input_action` | Write an input action with key, mouse, and joypad events to `project.godot`. Replaces the action's events unless `append` is true. | `name`, `events` (at most 32), `deadzone` (0 to 1), `append` |
 | `install_agent_skill` | Write this skill into the project and return the `.mcp.json` entry. | `overwrite` |
 | `get_scene_tree` | List the edited scene's nodes, breadth first. | `rootPath`, `maxDepth` (default 8, max 64), `maxNodes` (default 2000, max 10000) |
 | `open_scene` | Make a `.tscn` or `.scn` the edited scene. | `path` |
@@ -118,17 +129,17 @@ A tool failure returns `isError: true`, with `structuredContent.error` holding `
 | `CANCELLED` | The request was cancelled. A cancelled run is killed. A cancelled import keeps running in the editor. |
 | `NO_SCENE` | Call `open_scene` or `create_scene`. |
 | `NODE_NOT_FOUND`, `PROPERTY_NOT_FOUND` | Check the path with `get_scene_tree`, or the property name with `get_node_properties`. |
-| `INVALID_VALUE`, `UNSUPPORTED_TYPE` | The value doesn't fit the declared type. See Values. |
+| `INVALID_VALUE`, `UNSUPPORTED_TYPE` | The value doesn't fit the declared type. See Values. For `add_input_action`, an event is malformed or names an unknown key, modifier, or button; the message names `events[i]`. |
 | `INVALID_ARGUMENT` | The arguments conflict, for example `scene` with `script`, or `path` with a `play_scene` mode other than `custom`. A `build_dotnet` `configuration` must be letters, digits, `_`, `.`, and `-`, at most 64, and not start with `-`. |
 | `DOTNET_UNAVAILABLE` | `create_dotnet_project` ran in an editor build without .NET support. |
 | `INVALID_OPERATION`, `INVALID_MOVE` | The root can't be deleted or moved, or a node can't move into its own subtree. |
 | `DUPLICATE_NAME` | A sibling already has that name. |
-| `INVALID_NAME` | A setting name must be letters, digits, and `_` segments joined by `/`. |
+| `INVALID_NAME` | A setting name must be letters, digits, and `_` segments joined by `/`. An action name must be 1 to 128 characters, without `/`, `:`, `"`, `=`, `\`, or control characters, and without a space at either end. |
 | `INVALID_TYPE` | `add_node` got a class that is unknown, abstract, editor-only, or not a Node. |
 | `SCENE_CYCLE` | `add_node` with `scene` would nest the edited scene inside itself. |
 | `INVALID_PATH` | A `res://` path failed a rule. It must start with `res://`, and it must be normalized, with no `..`, `\`, `:`, or control characters. It must not be under `res://.godot/`, pass through a symbolic link, or have a `.remap` file. |
 | `FILE_NOT_FOUND`, `FILE_EXISTS`, `DIR_NOT_FOUND` | The file is missing, the new file already exists, or its folder is missing. `build_dotnet` returns `FILE_NOT_FOUND` when the `.csproj` has been removed since the editor started. |
-| `PROTECTED_PATH`, `PROTECTED_SETTING` | Scripts under `addons/godot_mcp/` can't be written or validated, and `enable_plugin` and `disable_plugin` refuse `godot_mcp`. The `editor/`, `editor_plugins/`, and `godot_mcp/` settings can't be set; use `enable_plugin` and `disable_plugin` for plugins. |
+| `PROTECTED_PATH`, `PROTECTED_SETTING` | Scripts under `addons/godot_mcp/` can't be written or validated, and `enable_plugin` and `disable_plugin` refuse `godot_mcp`. The `editor/`, `editor_plugins/`, `input/`, and `godot_mcp/` settings can't be set; use `enable_plugin` and `disable_plugin` for plugins and `add_input_action` for actions. |
 | `PLUGIN_FAILED` | The editor did not enable or disable the plugin, or its `plugin.cfg` can't be parsed or has no `script`. The message carries the errors the editor logged, such as a parse error in the plugin's script. A C# plugin script needs `build_dotnet` first. |
 | `NO_MATCH`, `AMBIGUOUS_MATCH` | `oldText` is absent, or occurs more than once. Add surrounding text so it matches once. `build_dotnet` returns `AMBIGUOUS_MATCH` when a second `.csproj` has appeared in the project root. |
 | `TOO_LARGE` | `oldText` is over 64 KB, or a script is over 1 MB. |
@@ -178,7 +189,7 @@ The setup codes (`NOT_LISTENING`, `UNSUPPORTED_PLATFORM`, `FOREIGN_SKILL`, `MISS
 
 ## Code runs in the editor
 
-Several tools also run project code. `validate_script` and the script writers run the static initializers of `@tool` scripts. A `@tool` script with a `_static_init` runs arbitrary code in the editor. `open_scene` runs the `@tool` scripts in the scenes it loads. `enable_plugin` runs the plugin's `_enter_tree` and `_enable_plugin`, and `disable_plugin` runs its `_disable_plugin` and `_exit_tree`. `get_node_properties` can run script getters. Setting a property can run a setter. `set_project_setting` changes autoloads and the main scene, which run when the game starts. `run_headless` and `play_scene` run the game. `build_dotnet` runs the project's MSBuild targets, analyzers, and source generators.
+Several tools also run project code. `validate_script` and the script writers run the static initializers of `@tool` scripts. A `@tool` script with a `_static_init` runs arbitrary code in the editor. `open_scene` runs the `@tool` scripts in the scenes it loads. `enable_plugin` runs the plugin's `_enter_tree` and `_enable_plugin`, and `disable_plugin` runs its `_disable_plugin` and `_exit_tree`. `get_node_properties` can run script getters. Setting a property can run a setter. `set_project_setting` changes autoloads and the main scene, which run when the game starts. `add_input_action` runs no project code. `run_headless` and `play_scene` run the game. `build_dotnet` runs the project's MSBuild targets, analyzers, and source generators.
 
 There is no sandbox. The bearer token is the only boundary. `addons/godot_mcp/` refuses script writes and validation with `PROTECTED_PATH`. That guards against accidents, not against a hostile caller. Use this server only with projects you trust.
 
