@@ -82,7 +82,7 @@ func tools() -> Array[Dictionary]:
 		},
 		{
 			"name": "install_asset",
-			"description": "Download an addon from the Godot Asset Library by its numeric id, install the archive's addons/ folders into res://addons/, and rescan. Only the record's current version is offered: `version` pins it, and `sha256` pins the download (the result always reports its SHA-256). Downloads only over https from GitHub and GitLab, checking every redirect. Files outside addons/ (project.godot, override.cfg, demos) are never written. An archive with native code (GDExtension, shared libraries) is refused with NATIVE_CODE, even with `allowNativeCode`: loading it reloads every editor script, which would cancel the call. An existing addon folder gives FILE_EXISTS unless `overwrite`, which keeps the old folder as a backup and refuses while a plugin in it is enabled. Plugins are not enabled: call enable_plugin. The addon is remote code (see Code runs in the editor in the skill). Only one job runs at a time (PROJECT_BUSY); other tools except play_scene keep working meanwhile.",
+			"description": "Download an addon from the Godot Asset Library by its numeric id, install the archive's addons/ folders into res://addons/, and rescan. Only the record's current version is offered: `version` pins it, and `sha256` pins the download (the result always reports its SHA-256). Downloads only over https from GitHub and GitLab, checking every redirect. Files outside addons/ (project.godot, override.cfg, demos) are never written. Native code (GDExtension, shared libraries) is refused with NATIVE_CODE unless `allowNativeCode`; such an install skips its scan, since loading native code reloads every editor script, so restart the editor next. The archive's .import files are never written. An existing addon folder gives FILE_EXISTS unless `overwrite`, which keeps the old folder as a backup and refuses while a plugin in it is enabled. Plugins are not enabled: call enable_plugin. The addon is remote code (see Code runs in the editor in the skill). Only one job runs at a time (PROJECT_BUSY); other tools except play_scene keep working meanwhile.",
 			"inputSchema": {
 				"type": "object",
 				"properties": {
@@ -90,7 +90,7 @@ func tools() -> Array[Dictionary]:
 					"version": {"type": "string", "description": "Must equal the asset's current version_string, else VERSION_MISMATCH."},
 					"sha256": {"type": "string", "description": "64 hex digits the download must hash to, else HASH_MISMATCH."},
 					"overwrite": {"type": "boolean", "description": "Replace existing addon folders, keeping each old one as a backup. Default false."},
-					"allowNativeCode": {"type": "boolean", "description": "Not honored yet: native code is refused even when true (see NATIVE_CODE). Default false."},
+					"allowNativeCode": {"type": "boolean", "description": "Install GDExtensions and native libraries. The install then skips its scan, and the editor loads them at its next scan; restart the editor next. Default false."},
 					"timeoutSec": {"type": "integer", "minimum": 1, "maximum": 540, "description": "Default 120."},
 				},
 				"required": ["assetId"],
@@ -187,8 +187,14 @@ func install_asset(arguments: Dictionary, request: Request) -> Variant:
 	return result
 
 
-# Scans the installed files in, as import_assets does, and adds what the scan logged.
+# Scans the installed files in, as import_assets does, and adds what the scan logged. Not after native
+# code: the scan that loads a new GDExtension reloads every editor script, which cancels this handler and
+# every other suspended one, so the call would never answer and the job slot would stay taken (4.7.2).
 func _after_install(result: Dictionary, started: int, timeout_ms: int, request: Request) -> Dictionary:
+	if result["nativeCode"]:
+		result["warnings"].append("Not scanned, because the archive holds native code. Restart the editor next: the next filesystem scan (import_assets, a focus change in a windowed editor, or a restart) loads it and reloads every editor script, which cancels any call or job running then, import_assets included")
+		result.merge({"diagnostics": [], "errorCount": 0, "warningCount": 0, "truncated": false, "ok": true})
+		return result
 	var cursor := _log.seq()
 	var before := _log.totals()
 	var waited := await _scan(started, timeout_ms, request)

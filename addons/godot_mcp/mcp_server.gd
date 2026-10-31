@@ -16,7 +16,7 @@ static var _CONTROL := RegEx.create_from_string("[\\x01-\\x07\\x0e-\\x1f]")
 static var _VT_ESCAPE := RegEx.create_from_string("(?<!\\\\)((?:\\\\\\\\)*)\\\\v")
 
 # At most 2,000 characters (D39); the conformance test checks it.
-const INSTRUCTIONS := "This server is the open Godot editor for one project, so it answers only while the editor runs. Call get_project_info first. Node edits stay in the editor until save_scene succeeds. run_headless reads files on disk, so save first. After adding or changing assets, call import_assets. Only one job (run_headless, import_assets or build_dotnet) runs at a time; check jobActive. A failed call returns error.code, such as PROJECT_BUSY or NO_SCENE. Math values are Godot literals such as \"Vector2(1, 2)\". The godot-mcp skill has the full guide: value syntax, error codes, limits and troubleshooting."
+const INSTRUCTIONS := "This server is the open Godot editor for one project, so it answers only while the editor runs. Call get_project_info first. Node edits stay in the editor until save_scene succeeds. run_headless reads files on disk, so save first. After adding or changing assets, call import_assets. Only one job (run_headless, import_assets, build_dotnet or install_asset) runs at a time; check jobActive. A failed call returns error.code, such as PROJECT_BUSY or NO_SCENE. Math values are Godot literals such as \"Vector2(1, 2)\". The godot-mcp skill has the full guide: value syntax, error codes, limits and troubleshooting."
 
 var _version: String
 # Each provider has tools() -> Array[Dictionary]; held here because handler Callables don't keep it alive.
