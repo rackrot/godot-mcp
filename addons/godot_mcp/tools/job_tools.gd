@@ -1,12 +1,14 @@
 @tool
 extends RefCounted
 
-## import_assets, run_headless and build_dotnet (D44, D46). One job at a time per editor: while one
-## runs, the next gets PROJECT_BUSY at once. run_headless and build_dotnet hand the FIFO back once
-## validated, since they touch only their own child process (D37); import_assets keeps the FIFO, since
-## it drives the editor's own importer. build_dotnet is always listed. Without exactly one root csproj
+## import_assets, run_headless, build_dotnet and install_asset (D44, D46, D69). One job at a time per
+## editor: while one runs, the next gets PROJECT_BUSY at once. run_headless and build_dotnet hand the
+## FIFO back once validated, since they touch only their own child process (D37), and install_asset
+## does too, since it is almost all network I/O; import_assets keeps the FIFO, since it drives the
+## editor's own importer. build_dotnet is always listed. Without exactly one root csproj
 ## (D15) its call fails with FILE_NOT_FOUND or AMBIGUOUS_MATCH, so a csproj added mid-session needs no restart.
 
+const AssetInstaller := preload("../asset_installer.gd")
 const JobRunner := preload("../job_runner.gd")
 const LogBuffer := preload("../log_buffer.gd")
 const OutputParser := preload("../output_parser.gd")
@@ -29,6 +31,8 @@ enum Wait { DONE, TIMED_OUT, CANCELLED }
 var _log: LogBuffer
 var _runner := JobRunner.new()
 var _busy := false
+# The running install_asset's request, cancelled when the plugin unloads.
+var _install_request: Request
 
 
 func _init(log: LogBuffer) -> void:
@@ -76,6 +80,24 @@ func tools() -> Array[Dictionary]:
 			},
 			"handler": build_dotnet,
 		},
+		{
+			"name": "install_asset",
+			"description": "Download an addon from the Godot Asset Library by its numeric id, install the archive's addons/ folders into res://addons/, and rescan. Only the record's current version is offered: `version` pins it, and `sha256` pins the download (the result always reports its SHA-256). Downloads only over https from GitHub and GitLab, checking every redirect. Files outside addons/ (project.godot, override.cfg, demos) are never written. An archive with native code (GDExtension, shared libraries) is refused with NATIVE_CODE, even with `allowNativeCode`: loading it reloads every editor script, which would cancel the call. An existing addon folder gives FILE_EXISTS unless `overwrite`, which keeps the old folder as a backup and refuses while a plugin in it is enabled. Plugins are not enabled: call enable_plugin. The addon is remote code (see Code runs in the editor in the skill). Only one job runs at a time (PROJECT_BUSY); other tools except play_scene keep working meanwhile.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {
+					"assetId": {"type": "integer", "minimum": 1, "maximum": 2147483647, "description": "The asset's id, the number in its godotengine.org/asset-library/asset/<id> page."},
+					"version": {"type": "string", "description": "Must equal the asset's current version_string, else VERSION_MISMATCH."},
+					"sha256": {"type": "string", "description": "64 hex digits the download must hash to, else HASH_MISMATCH."},
+					"overwrite": {"type": "boolean", "description": "Replace existing addon folders, keeping each old one as a backup. Default false."},
+					"allowNativeCode": {"type": "boolean", "description": "Not honored yet: native code is refused even when true (see NATIVE_CODE). Default false."},
+					"timeoutSec": {"type": "integer", "minimum": 1, "maximum": 540, "description": "Default 120."},
+				},
+				"required": ["assetId"],
+				"additionalProperties": false,
+			},
+			"handler": install_asset,
+		},
 	]
 	return definitions
 
@@ -85,9 +107,11 @@ func job_active() -> bool:
 	return _busy
 
 
-## Kills the running job's child; called when the plugin unloads.
+## Kills the running job's child and stops a running install; called when the plugin unloads.
 func shutdown() -> void:
 	_runner.kill()
+	if _install_request != null:
+		_install_request.cancelled = true
 
 
 func import_assets(arguments: Dictionary, request: Request) -> Variant:
@@ -143,6 +167,41 @@ func build_dotnet(arguments: Dictionary, request: Request) -> Variant:
 	return result
 
 
+func install_asset(arguments: Dictionary, request: Request) -> Variant:
+	if arguments.has("sha256") and not AssetInstaller.is_sha256(arguments["sha256"]):
+		return ToolError.fail("INVALID_ARGUMENT", "sha256 must be 64 hex digits")
+	if _busy:
+		return _busy_error()
+	var timeout_ms := int(arguments.get("timeoutSec", 120)) * 1000
+	_busy = true
+	_install_request = request
+	request.extend_budget(timeout_ms + BUDGET_SLACK_MS, true)
+	var started := Time.get_ticks_msec()
+	# A local, so the installer outlives its awaits.
+	var installer := AssetInstaller.new(request, started + timeout_ms)
+	var result: Dictionary = await installer.install(arguments)
+	if not result.has("error"):
+		result = await _after_install(result, started, timeout_ms, request)
+	_install_request = null
+	_busy = false
+	return result
+
+
+# Scans the installed files in, as import_assets does, and adds what the scan logged.
+func _after_install(result: Dictionary, started: int, timeout_ms: int, request: Request) -> Dictionary:
+	var cursor := _log.seq()
+	var before := _log.totals()
+	var waited := await _scan(started, timeout_ms, request)
+	if waited == Wait.CANCELLED:
+		return ToolError.fail("CANCELLED", "The request was cancelled after %s was installed; the editor's scan carries on" % ", ".join(PackedStringArray(result["addons"])))
+	var report := _scan_report(cursor, before)
+	if waited == Wait.TIMED_OUT:
+		result["warnings"].append("The editor was still scanning the new files at the deadline; it carries on")
+	result.merge(report)
+	result["ok"] = waited == Wait.DONE and report["errorCount"] == 0
+	return result
+
+
 # {args} or a tool failure. User arguments follow `--`, so the engine never reads them as its own flags.
 func _launch_args(arguments: Dictionary) -> Dictionary:
 	if arguments.has("scene") and arguments.has("script"):
@@ -189,38 +248,58 @@ func _run(args: PackedStringArray, timeout_ms: int, request: Request) -> Variant
 	return result
 
 
-# is_scanning() turns false when the scan thread ends, before the editor has applied the results and
-# reimported the changed files (A14, refined), so the import is done at the next filesystem_changed.
 func _import(timeout_ms: int, request: Request) -> Variant:
 	var started := Time.get_ticks_msec()
-	var files := EditorInterface.get_resource_filesystem()
 	var cursor := _log.seq()
 	var before := _log.totals()
-	# scan() does nothing while a scan is running, and that scan may predate the new files, so let a
-	# running one finish first.
-	var waited := await _wait(func() -> bool: return not _filesystem_busy(files), started, timeout_ms, request)
-	if waited == Wait.DONE:
-		var changed := [false]
-		var on_changed := func() -> void: changed[0] = true
-		files.filesystem_changed.connect(on_changed)
-		# scan() also does nothing while the previous scan's thread is still being collected, and that
-		# scan's own filesystem_changed must not count, so judge each call only by its own effect.
-		var retries := 0
-		while true:
-			changed[0] = false
-			files.scan()
-			if changed[0] or _filesystem_busy(files) or retries >= SCAN_RETRIES:
-				break
-			retries += 1
-			if not await request.next_frame():
-				waited = Wait.CANCELLED
-				break
-		if waited == Wait.DONE:
-			waited = await _wait(func() -> bool: return changed[0] and not _filesystem_busy(files), started, timeout_ms, request)
-		files.filesystem_changed.disconnect(on_changed)
+	var waited := await _scan(started, timeout_ms, request)
 	# A cancelled import stops waiting; the scan itself carries on in the editor.
 	if waited == Wait.CANCELLED:
 		return ToolError.fail("CANCELLED", "The request was cancelled; the editor's scan carries on")
+	var report := _scan_report(cursor, before)
+	report.merge({
+		"ok": waited == Wait.DONE and report["errorCount"] == 0,
+		"durationMs": Time.get_ticks_msec() - started,
+		"timedOut": waited == Wait.TIMED_OUT,
+	})
+	return report
+
+
+# Rescans the project and waits until the editor has applied the scan and reimported what it found,
+# for import_assets and install_asset (D69). is_scanning() turns false when the scan thread ends, before
+# the editor has applied the results and reimported the changed files (A14, refined), so the import is
+# done at the next filesystem_changed.
+func _scan(started: int, timeout_ms: int, request: Request) -> Wait:
+	var files := EditorInterface.get_resource_filesystem()
+	# scan() does nothing while a scan is running, and that scan may predate the new files, so let a
+	# running one finish first.
+	var waited := await _wait(func() -> bool: return not _filesystem_busy(files), started, timeout_ms, request)
+	if waited != Wait.DONE:
+		return waited
+	var changed := [false]
+	var on_changed := func() -> void: changed[0] = true
+	files.filesystem_changed.connect(on_changed)
+	# scan() also does nothing while the previous scan's thread is still being collected, and that
+	# scan's own filesystem_changed must not count, so judge each call only by its own effect.
+	var retries := 0
+	while true:
+		changed[0] = false
+		files.scan()
+		if changed[0] or _filesystem_busy(files) or retries >= SCAN_RETRIES:
+			break
+		retries += 1
+		if not await request.next_frame():
+			waited = Wait.CANCELLED
+			break
+	if waited == Wait.DONE:
+		waited = await _wait(func() -> bool: return changed[0] and not _filesystem_busy(files), started, timeout_ms, request)
+	files.filesystem_changed.disconnect(on_changed)
+	return waited
+
+
+# {diagnostics, errorCount, warningCount, truncated} for the errors and warnings logged since `cursor`
+# (from _log.seq()), with `before` from _log.totals() taken at the same time.
+func _scan_report(cursor: int, before: Dictionary) -> Dictionary:
 	var diagnostics: Array[Dictionary] = []
 	var chars := 0
 	# The counts come from the log's running totals, which its ring can't forget; the entries may be fewer.
@@ -238,13 +317,9 @@ func _import(timeout_ms: int, request: Request) -> Variant:
 			item["file"] = entry["file"]
 			item["line"] = entry["line"]
 		diagnostics.append(item)
-	var error_count: int = after["errors"] - before["errors"]
 	return {
-		"ok": waited == Wait.DONE and error_count == 0,
-		"durationMs": Time.get_ticks_msec() - started,
-		"timedOut": waited == Wait.TIMED_OUT,
 		"diagnostics": diagnostics,
-		"errorCount": error_count,
+		"errorCount": after["errors"] - before["errors"],
 		"warningCount": after["warnings"] - before["warnings"],
 		"truncated": truncated,
 	}
@@ -266,4 +341,4 @@ func _wait(done: Callable, started: int, timeout_ms: int, request: Request) -> W
 
 
 func _busy_error() -> Dictionary:
-	return ToolError.fail("PROJECT_BUSY", "Another job (run_headless, import_assets or build_dotnet) is running; retry when get_project_info reports jobActive false")
+	return ToolError.fail("PROJECT_BUSY", "Another job (run_headless, import_assets, build_dotnet or install_asset) is running; retry when get_project_info reports jobActive false")
