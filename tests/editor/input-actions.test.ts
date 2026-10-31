@@ -295,6 +295,13 @@ describe("refusals", () => {
       { name: "a\nb", events: ["F1"] },
       "INVALID_NAME",
     ],
+    ["a quote in the name", { name: 'a"b', events: ["F1"] }, "INVALID_NAME"],
+    ["a colon in the name", { name: "a:b", events: ["F1"] }, "INVALID_NAME"],
+    [
+      "a backslash in the name",
+      { name: "a\\b", events: ["F1"] },
+      "INVALID_NAME",
+    ],
   ];
   for (const [label, args, code] of cases)
     test(`${label} gives ${code} and project.godot is unchanged`, async () => {
