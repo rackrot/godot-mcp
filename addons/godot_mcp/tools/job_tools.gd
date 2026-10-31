@@ -192,7 +192,7 @@ func install_asset(arguments: Dictionary, request: Request) -> Variant:
 # every other suspended one, so the call would never answer and the job slot would stay taken (4.7.2).
 func _after_install(result: Dictionary, started: int, timeout_ms: int, request: Request) -> Dictionary:
 	if result["nativeCode"]:
-		result["warnings"].append("Not scanned, because the archive holds native code. Restart the editor next: the next filesystem scan (import_assets, a focus change in a windowed editor, or a restart) loads it and reloads every editor script, which cancels any call or job running then, import_assets included")
+		result["warnings"].append("Not scanned, because the archive holds native code. Restart the editor next: the next filesystem scan (import_assets, another install_asset, a focus change in a windowed editor, or a restart) loads it and reloads every editor script. A call or job running then never answers, and the job slot (every job, plus play_scene) stays taken until the editor restarts")
 		result.merge({"diagnostics": [], "errorCount": 0, "warningCount": 0, "truncated": false, "ok": true})
 		return result
 	var cursor := _log.seq()
