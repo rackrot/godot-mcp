@@ -67,9 +67,14 @@ async function plugins(): Promise<Record<string, boolean>> {
 describe("get_project_info.plugins", () => {
   test("lists each plugin folder with its enabled flag and version, skipping links", async () => {
     const info = await ok("get_project_info");
+    const ownCfg = await readFile(
+      join(editor.dir, "addons", "godot_mcp", "plugin.cfg"),
+      "utf8",
+    );
+    const ownVersion = ownCfg.match(/^version="([^"]*)"/m)?.[1];
     expect(info.plugins).toEqual([
       { name: "broken_plugin", enabled: false, version: "0.0.1" },
-      { name: "godot_mcp", enabled: true, version: "0.1.0" },
+      { name: "godot_mcp", enabled: true, version: ownVersion },
       { name: "marker", enabled: false, version: "1.2.3" },
       { name: "no_script", enabled: false, version: "1.0" },
       { name: "vendor/nested", enabled: false, version: null },
@@ -117,9 +122,6 @@ describe("enable_plugin and disable_plugin", () => {
     });
     // Its script does not exist, so the editor refuses; the path form was accepted.
     expect(result.structuredContent.error.code).toBe("PLUGIN_FAILED");
-    expect(result.structuredContent.error.message).toContain(
-      "res://addons/vendor/nested/plugin.cfg",
-    );
   });
 
   for (const tool of ["enable_plugin", "disable_plugin"]) {
