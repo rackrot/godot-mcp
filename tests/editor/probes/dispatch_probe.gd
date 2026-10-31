@@ -38,6 +38,7 @@ func _main() -> void:
 	_http = script.new(tcp, _port, "tok", _handle)
 
 	await _empty_results()
+	await _content_blocks()
 	_control_characters()
 	_codec_references()
 	_log_buffer()
@@ -68,6 +69,27 @@ func _empty_results() -> void:
 			_check("empty result is a success", result["isError"] == false and result["structuredContent"] == {}, reply[1])
 		else:
 			_check("%s result is INTERNAL" % tool_name, result["isError"] == true and result["structuredContent"]["error"]["code"] == "INTERNAL", reply[1])
+
+
+# D61: `_content` image blocks follow the text block and appear nowhere else; any other block is INTERNAL.
+func _content_blocks() -> void:
+	var mcp := McpServer.new("t", [Fake.new()])
+	var reply: Dictionary = await _call(mcp, "image")
+	var result: Dictionary = reply["result"]
+	var content: Array = result["content"]
+	var text: Dictionary = JSON.parse_string(content[0]["text"])
+	_check("an image block follows the text block", content.size() == 2 and content[0]["type"] == "text" and content[1] == Fake.IMAGE and result["isError"] == false, JSON.stringify(reply))
+	_check("_content is not in structuredContent or the text", result["structuredContent"] == {"a": 1.0} and text == {"a": 1.0}, JSON.stringify(reply))
+	for tool_name: String in ["textblock", "badmime", "notarray"]:
+		reply = await _call(mcp, tool_name)
+		result = reply["result"]
+		_check("a %s _content is INTERNAL" % tool_name, result["isError"] == true and result["structuredContent"]["error"]["code"] == "INTERNAL" and result["content"].size() == 1, JSON.stringify(reply))
+
+
+func _call(mcp: McpServer, tool_name: String) -> Dictionary:
+	var body := JSON.stringify({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool_name}}).to_utf8_buffer()
+	var reply: Array = await mcp.handle(body, {}, Request.new())
+	return JSON.parse_string(reply[1])
 
 
 # Replies stay valid JSON with control characters in strings. The raw reply goes to dispatch.test.ts,
@@ -189,6 +211,8 @@ func _handle(body: PackedByteArray, _headers: Dictionary, request: Request) -> V
 class Fake:
 	extends RefCounted
 
+	const IMAGE := {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+
 	func tools() -> Array[Dictionary]:
 		var schema := {"type": "object", "properties": {}}
 		return [
@@ -197,6 +221,10 @@ class Fake:
 			{"name": "array", "inputSchema": schema, "handler": array},
 			{"name": "broken", "inputSchema": schema, "handler": broken},
 			{"name": "control", "inputSchema": schema, "handler": control},
+			{"name": "image", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"a": 1, "_content": [IMAGE]}},
+			{"name": "textblock", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": [{"type": "text", "text": "x"}]}},
+			{"name": "badmime", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": [{"type": "image", "data": "x", "mimeType": "image/gif"}]}},
+			{"name": "notarray", "inputSchema": schema, "handler": func(_a: Dictionary, _r: Request) -> Variant: return {"_content": IMAGE}},
 		]
 
 	# U+0001, U+000B and U+001B, a literal backslash then v, and a literal double backslash then v.

@@ -182,11 +182,31 @@ func _call_tool(params: Dictionary, request: Request) -> Dictionary:
 	# stands in); that is a tool failure, never a success. An empty Dictionary is a legitimate result.
 	if not structured is Dictionary:
 		structured = {"error": {"code": "INTERNAL", "message": "Tool %s failed with a script error" % name}}
+	# D61: a handler may add content blocks under the reserved key `_content`; only images are accepted.
+	var blocks: Variant = structured.get("_content", [])
+	structured.erase("_content")
+	if not _image_blocks(blocks):
+		blocks = []
+		structured = {"error": {"code": "INTERNAL", "message": "Tool %s returned a content block that is not an image" % name}}
+	var content := [{"type": "text", "text": _stringify(structured)}]
+	content.append_array(blocks)
 	return {"result": {
-		"content": [{"type": "text", "text": _stringify(structured)}],
+		"content": content,
 		"structuredContent": structured,
 		"isError": structured.has("error"),
 	}}
+
+
+static func _image_blocks(blocks: Variant) -> bool:
+	if not blocks is Array:
+		return false
+	for block: Variant in blocks:
+		if not block is Dictionary or block.size() != 3 or not block.get("data") is String:
+			return false
+		# `in` compares without the error `!=` raises between a String and another type.
+		if block.get("type") not in ["image"] or block.get("mimeType") not in ["image/png", "image/jpeg"]:
+			return false
+	return true
 
 
 static func _error(id: Variant, code: int, message: String, data: Variant = null) -> String:

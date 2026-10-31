@@ -1,6 +1,7 @@
 @tool
 extends EditorPlugin
 
+const CaptureDebugger := preload("capture_debugger.gd")
 const HttpServer := preload("http_server.gd")
 const LogBuffer := preload("log_buffer.gd")
 const McpServer := preload("mcp_server.gd")
@@ -19,6 +20,7 @@ const PORT_LAST := 6649
 const STATE_DIR := "res://.godot/godot_mcp"
 const MENU_ITEM := "MCP: install agent skill / show config"
 
+var _capture: CaptureDebugger
 var _http: HttpServer
 var _mcp: McpServer
 var _log: LogBuffer
@@ -48,7 +50,9 @@ func _enter_tree() -> void:
 	_setup = Setup.new(port)
 	# Callables don't keep RefCounted targets alive, so the plugin holds the MCP server.
 	_jobs = JobTools.new(_log)
-	_mcp = McpServer.new(version, [ProjectTools.new(version, _jobs.job_active, _setup.install), SceneTools.new(_log), NodeTools.new(), ScriptTools.new(_log), TreeTools.new(), EditorTools.new(_log, _jobs.job_active, _cfg_path()), _jobs])
+	_capture = CaptureDebugger.new()
+	add_debugger_plugin(_capture)
+	_mcp = McpServer.new(version, [ProjectTools.new(version, _jobs.job_active, _setup.install), SceneTools.new(_log), NodeTools.new(), ScriptTools.new(_log), TreeTools.new(), EditorTools.new(_log, _jobs.job_active, _cfg_path(), _capture), _jobs])
 	_http = HttpServer.new(tcp, port, token, _mcp.handle, _mcp.ingress, _mcp.done)
 	print("godot_mcp: serving http://127.0.0.1:%d/mcp" % port)
 
@@ -59,6 +63,9 @@ func _exit_tree() -> void:
 	if _jobs != null:
 		_jobs.shutdown()
 		_jobs = null
+	if _capture != null:
+		remove_debugger_plugin(_capture)
+		_capture = null
 	if _log != null:
 		OS.remove_logger(_log)
 		_log = null
