@@ -12,10 +12,15 @@ const inputSchema = z.object({
   timeoutSec: z.number().int().min(1).default(120),
 });
 
+// --import starts the editor, which binds the GDScript language server (port 6005 by default). When
+// another editor already holds that port, shutdown logs `!thread.is_started()` as an ERROR and the
+// import reports ok:false. The import never needs the server, so --lsp-port 0 skips the clash.
 export const importArgs = (root: string) => [
   "--headless",
   "--path",
   root,
+  "--lsp-port",
+  "0",
   "--import",
 ];
 
