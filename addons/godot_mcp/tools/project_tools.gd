@@ -8,6 +8,8 @@ const ResPaths := preload("../res_paths.gd")
 const ValueCodec := preload("../value_codec.gd")
 const ValueDecoder := preload("../value_decoder.gd")
 
+const PLUGIN_DEPTH := 3
+const MAX_PLUGINS := 200
 const PROTECTED_PREFIXES: Array[String] = ["editor/", "editor_plugins/", "godot_mcp/"]
 
 static var TARGET_FRAMEWORK := RegEx.create_from_string("^net(\\d+)\\.\\d+\\z")
@@ -30,7 +32,7 @@ func tools() -> Array[Dictionary]:
 	return [
 		{
 			"name": "get_project_info",
-			"description": "Read the project's name, main scene, features and autoloads, the Godot version and binary, the root csproj (`dotnet`), and the editor's open, unsaved, edited and playing scenes. Call this first.",
+			"description": "Read the project's name, main scene, features and autoloads, the Godot version and binary, the root csproj (`dotnet`), the plugins under res://addons/ (`plugins`: name, enabled, version), and the editor's open, unsaved, edited and playing scenes. Call this first.",
 			"inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
 			"annotations": {"readOnlyHint": true},
 			"handler": get_project_info,
@@ -61,7 +63,7 @@ func tools() -> Array[Dictionary]:
 		},
 		{
 			"name": "set_project_setting",
-			"description": "Set one project setting and write project.godot, e.g. application/run/main_scene or an autoload. The value is parsed by the setting's declared type, as in update_property; a new setting takes bool, number, string, array or object. Settings under `editor/`, `editor_plugins/` and `godot_mcp/` are refused. `application/run/main_scene` and `autoload/*` must name an existing scene or script by res:// path or uid:// (a uid is resolved and its path checked), and a string value must not contain control characters. Some settings, autoloads included, apply only after the editor restarts.",
+			"description": "Set one project setting and write project.godot, e.g. application/run/main_scene or an autoload. The value is parsed by the setting's declared type, as in update_property; a new setting takes bool, number, string, array or object. Settings under `editor/`, `editor_plugins/` (use enable_plugin and disable_plugin) and `godot_mcp/` are refused. `application/run/main_scene` and `autoload/*` must name an existing scene or script by res:// path or uid:// (a uid is resolved and its path checked), and a string value must not contain control characters. Some settings, autoloads included, apply only after the editor restarts.",
 			"inputSchema": {
 				"type": "object",
 				"properties": {
@@ -114,6 +116,7 @@ func get_project_info(_arguments: Dictionary, _request: Request) -> Variant:
 		"mainScene": main_scene if main_scene != "" else null,
 		"features": Array(ProjectSettings.get_setting("application/config/features", PackedStringArray())),
 		"autoloads": autoloads,
+		"plugins": _plugins(),
 		"dotnet": dotnet,
 		"editedScene": edited.scene_file_path if edited != null else null,
 		"openScenes": Array(EditorInterface.get_open_scenes()),
@@ -122,6 +125,38 @@ func get_project_info(_arguments: Dictionary, _request: Request) -> Variant:
 		"scanning": EditorInterface.get_resource_filesystem().is_scanning() or EditorInterface.get_resource_filesystem().is_importing(),
 		"jobActive": _job_active.call(),
 	}
+
+
+# D53: every plugin.cfg under res://addons/, at most PLUGIN_DEPTH folders deep, sorted, at most MAX_PLUGINS.
+func _plugins() -> Array[Dictionary]:
+	var names: Array[String] = []
+	_find_plugins("", 1, names)
+	names.sort()
+	var out: Array[Dictionary] = []
+	for name in names.slice(0, MAX_PLUGINS):
+		var path := "res://addons/%s/plugin.cfg" % name
+		var cfg := ConfigFile.new()
+		var version: Variant = null
+		if cfg.load(path) == OK and cfg.has_section_key("plugin", "version"):
+			version = str(cfg.get_value("plugin", "version"))
+		out.append({"name": name, "enabled": EditorInterface.is_plugin_enabled(path), "version": version})
+	return out
+
+
+# Appends the folder names (relative to res://addons/) that hold a plugin.cfg; does not follow links.
+func _find_plugins(relative: String, depth: int, names: Array[String]) -> void:
+	var dir := "res://addons".path_join(relative)
+	var access := DirAccess.open(dir)
+	if access == null:
+		return
+	for folder in access.get_directories():
+		if access.is_link(ProjectSettings.globalize_path(dir).path_join(folder)):
+			continue
+		var name := relative.path_join(folder)
+		if FileAccess.file_exists("res://addons/%s/plugin.cfg" % name):
+			names.append(name)
+		elif depth < PLUGIN_DEPTH:
+			_find_plugins(name, depth + 1, names)
 
 
 func create_dotnet_project(arguments: Dictionary, _request: Request) -> Variant:
@@ -195,6 +230,8 @@ func set_project_setting(arguments: Dictionary, _request: Request) -> Variant:
 	# editor/ holds the play-mode command line (main_run_args), which can write outside the project.
 	for prefix in PROTECTED_PREFIXES:
 		if lower.begins_with(prefix):
+			if prefix == "editor_plugins/":
+				return ToolError.fail("PROTECTED_SETTING", name + " cannot be changed through this tool; use enable_plugin or disable_plugin")
 			return ToolError.fail("PROTECTED_SETTING", name + " cannot be changed through this tool")
 	var raw: Variant = arguments["value"]
 	var problem := _path_problem(name, raw)

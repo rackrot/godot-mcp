@@ -48,7 +48,7 @@ func _enter_tree() -> void:
 	_setup = Setup.new(port)
 	# Callables don't keep RefCounted targets alive, so the plugin holds the MCP server.
 	_jobs = JobTools.new(_log)
-	_mcp = McpServer.new(version, [ProjectTools.new(version, _jobs.job_active, _setup.install), SceneTools.new(_log), NodeTools.new(), ScriptTools.new(_log), TreeTools.new(), EditorTools.new(_log, _jobs.job_active), _jobs])
+	_mcp = McpServer.new(version, [ProjectTools.new(version, _jobs.job_active, _setup.install), SceneTools.new(_log), NodeTools.new(), ScriptTools.new(_log), TreeTools.new(), EditorTools.new(_log, _jobs.job_active, _cfg_path()), _jobs])
 	_http = HttpServer.new(tcp, port, token, _mcp.handle, _mcp.ingress, _mcp.done)
 	print("godot_mcp: serving http://127.0.0.1:%d/mcp" % port)
 
@@ -145,9 +145,13 @@ static func _publish(dir: String, name: String, text: String) -> Error:
 	return DirAccess.rename_absolute(tmp, path)
 
 
+func _cfg_path() -> String:
+	return (get_script() as Script).resource_path.get_base_dir().path_join("plugin.cfg")
+
+
 func _addon_version() -> String:
 	var cfg := ConfigFile.new()
-	var path := (get_script() as Script).resource_path.get_base_dir().path_join("plugin.cfg")
+	var path := _cfg_path()
 	var err := cfg.load(path)
 	if err != OK:
 		push_error("godot_mcp: cannot read %s (%s)." % [path, error_string(err)])

@@ -14,11 +14,14 @@ const WAIT_MS := 10000
 var _log: LogBuffer
 # func() -> bool: whether a job (run_headless, import_assets, build_dotnet) is running.
 var _job_active: Callable
+# This addon's own plugin.cfg: disabling it would free the plugin whose handler is on the stack (D51).
+var _own_cfg: String
 
 
-func _init(log: LogBuffer, job_active: Callable) -> void:
+func _init(log: LogBuffer, job_active: Callable, own_cfg: String) -> void:
 	_log = log
 	_job_active = job_active
+	_own_cfg = own_cfg
 
 
 func tools() -> Array[Dictionary]:
@@ -57,6 +60,28 @@ func tools() -> Array[Dictionary]:
 			"description": "Stop the scene started by play_scene, or one a person started in the editor. `stopped` is false when nothing was playing.",
 			"inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
 			"handler": stop_scene,
+		},
+		{
+			"name": "enable_plugin",
+			"description": "Enable an editor plugin under res://addons/ in the open editor, without a restart, and write project.godot. Runs the plugin's _enter_tree and _enable_plugin (see Code runs in the editor). `changed` is false when it was already enabled. A plugin with a C# script needs build_dotnet first. get_project_info lists the plugins.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {"name": {"type": "string", "minLength": 1, "description": "The plugin's folder under res://addons/, such as marker or vendor/foo."}},
+				"required": ["name"],
+				"additionalProperties": false,
+			},
+			"handler": enable_plugin,
+		},
+		{
+			"name": "disable_plugin",
+			"description": "Disable an editor plugin under res://addons/ in the open editor and write project.godot. Runs the plugin's _disable_plugin and _exit_tree. `changed` is false when it was already disabled. The godot_mcp addon itself is refused.",
+			"inputSchema": {
+				"type": "object",
+				"properties": {"name": {"type": "string", "minLength": 1, "description": "The plugin's folder under res://addons/, such as marker or vendor/foo."}},
+				"required": ["name"],
+				"additionalProperties": false,
+			},
+			"handler": disable_plugin,
 		},
 	]
 
@@ -105,6 +130,54 @@ func stop_scene(_arguments: Dictionary, request: Request) -> Variant:
 	if not await _wait_until(request, false):
 		return ToolError.fail("STOP_FAILED", "The game did not stop within %d ms; see get_editor_log" % WAIT_MS)
 	return {"stopped": was_playing}
+
+
+func enable_plugin(arguments: Dictionary, _request: Request) -> Variant:
+	return _set_plugin(arguments["name"], true)
+
+
+func disable_plugin(arguments: Dictionary, _request: Request) -> Variant:
+	return _set_plugin(arguments["name"], false)
+
+
+# D51. The editor reports a failed toggle only through a dialog, so this checks the state afterwards.
+func _set_plugin(name: String, enabled: bool) -> Variant:
+	# Pass the checked full path to the setter, never `name`: it takes any res:// string verbatim.
+	var path := "res://addons/%s/plugin.cfg" % name
+	# Before check_file, so a case variant that doesn't exist on a case-sensitive disk is still refused.
+	if path.to_lower() == _own_cfg.to_lower():
+		return ToolError.fail("PROTECTED_PATH", "The godot_mcp addon cannot be enabled or disabled through this tool: disabling it would free the plugin that is answering")
+	var problem := ResPaths.check_file(path, ["cfg"])
+	if not problem.is_empty():
+		return problem
+	var script_path := ""
+	if enabled:
+		var cfg := ConfigFile.new()
+		var load_err := cfg.load(path)
+		if load_err != OK:
+			return ToolError.fail("PLUGIN_FAILED", "Cannot parse %s (%s)" % [path, error_string(load_err)])
+		script_path = str(cfg.get_value("plugin", "script", ""))
+		if script_path == "":
+			return ToolError.fail("PLUGIN_FAILED", "%s has no plugin/script key" % path)
+	if EditorInterface.is_plugin_enabled(path) == enabled:
+		return {"name": name, "path": path, "enabled": enabled, "changed": false}
+	var cursor := _log.seq()
+	EditorInterface.set_plugin_enabled(path, enabled)
+	if EditorInterface.is_plugin_enabled(path) != enabled:
+		var lines: Array[String] = []
+		for entry in _log.errors_since(cursor):
+			lines.append("%s:%d %s" % [entry.get("file", ""), entry.get("line", 0), entry["message"]])
+		var message := "The editor did not %s %s." % ["enable" if enabled else "disable", path]
+		if not lines.is_empty():
+			message += " Errors: " + "; ".join(lines.slice(0, 10))
+		if script_path.get_extension().to_lower() == "cs":
+			message += " The plugin script is C#; run build_dotnet first."
+		return ToolError.fail("PLUGIN_FAILED", message)
+	# The editor saves editor_plugins/enabled on a timer; write it now so it is on disk when this returns.
+	var err := ProjectSettings.save()
+	if err != OK:
+		return ToolError.fail("SAVE_FAILED", "The plugin is %s in the editor, but project.godot could not be saved (%s)" % ["enabled" if enabled else "disabled", error_string(err)])
+	return {"name": name, "path": path, "enabled": enabled, "changed": true}
 
 
 # Waits for is_playing_scene() to become `playing`. False on timeout or cancellation.
