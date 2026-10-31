@@ -15,6 +15,8 @@ export interface ZipEntry {
   flags?: number;
   // The uncompressed size written in both headers, instead of the real one.
   declaredSize?: number;
+  // The compressed size written in both headers, instead of the real one.
+  declaredCompressedSize?: number;
 }
 
 export function zip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
@@ -34,6 +36,7 @@ export function zip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
     const method = entry.method ?? (isDir ? 0 : 8);
     const body = method === 8 ? deflateRawSync(data) : data;
     const size = entry.declaredSize ?? data.length;
+    const compressed = entry.declaredCompressedSize ?? body.length;
     const mode = entry.mode ?? (isDir ? 0o40755 : 0o100644);
     const flags = entry.flags ?? 0;
     const crc = crc32(data);
@@ -46,7 +49,7 @@ export function zip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
     local.writeUInt16LE(0, 10);
     local.writeUInt16LE(0x21, 12);
     local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(compressed, 18);
     local.writeUInt32LE(size, 22);
     local.writeUInt16LE(name.length, 26);
     local.writeUInt16LE(0, 28);
@@ -61,7 +64,7 @@ export function zip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
     central.writeUInt16LE(0, 12);
     central.writeUInt16LE(0x21, 14);
     central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(body.length, 20);
+    central.writeUInt32LE(compressed, 20);
     central.writeUInt32LE(size, 24);
     central.writeUInt16LE(name.length, 28);
     central.writeUInt32LE(((mode << 16) | (isDir ? 0x10 : 0)) >>> 0, 38);

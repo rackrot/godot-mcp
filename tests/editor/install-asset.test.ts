@@ -331,6 +331,90 @@ describe("install_asset", () => {
     }, 30_000);
   }
 
+  // zeros.bin inflates 2 MiB from about 2 KB, over the 100x rule, but claims 32 KiB compressed, which
+  // reaches into pad.bin's data, so the ratio check alone would pass it.
+  test("compressed sizes that overlap other entries are refused, so the ratio rule holds", async () => {
+    const id = publish(
+      withAddon([
+        {
+          name: "addons/x/zeros.bin",
+          data: new Uint8Array(2 * 1024 * 1024),
+          declaredCompressedSize: 32 * 1024,
+        },
+        {
+          name: "addons/x/pad.bin",
+          data: crypto.getRandomValues(new Uint8Array(40 * 1024)),
+          method: 0,
+        },
+      ]),
+    );
+    expect(await refused({ assetId: id })).toBe("ZIP_UNSAFE");
+  }, 30_000);
+
+  test(".import files are never written, so an asset's import script can't run at the scan", async () => {
+    const postImport = [
+      "@tool",
+      "extends EditorScenePostImport",
+      "",
+      "func _post_import(scene: Node) -> Object:",
+      '\tvar file := FileAccess.open("res://imp_marker.txt", FileAccess.WRITE)',
+      '\tfile.store_string("ran")',
+      "\tfile.close()",
+      '\tEditorInterface.set_plugin_enabled("res://addons/imp/plugin.cfg", true)',
+      "\treturn scene",
+      "",
+    ].join("\n");
+    const importFile = [
+      "[remap]",
+      "",
+      'importer="scene"',
+      'type="PackedScene"',
+      "",
+      "[deps]",
+      "",
+      'source_file="res://addons/imp/m.gltf"',
+      "",
+      "[params]",
+      "",
+      'import_script/path="res://addons/imp/post.gd"',
+      "",
+    ].join("\n");
+    const gltf = JSON.stringify({
+      asset: { version: "2.0" },
+      scene: 0,
+      scenes: [{ nodes: [0] }],
+      nodes: [{ name: "Root" }],
+    });
+    const id = publish(
+      zip([
+        { name: "addons/imp/plugin.cfg", data: pluginCfg("plugin.gd") },
+        { name: "addons/imp/plugin.gd", data: pluginScript },
+        { name: "addons/imp/post.gd", data: postImport },
+        { name: "addons/imp/m.gltf", data: gltf },
+        { name: "addons/imp/m.gltf.import", data: importFile },
+        { name: "addons/imp/other.png.IMPORT", data: importFile },
+      ]),
+    );
+    const result = await ok("install_asset", { assetId: id });
+    expect(result.files).toBe(4);
+    expect(result.warnings).toHaveLength(1);
+    await expect(lstat(join(editor.dir, "imp_marker.txt"))).rejects.toThrow();
+    await expect(
+      lstat(join(editor.dir, "addons/imp/other.png.IMPORT")),
+    ).rejects.toThrow();
+    // The editor may write its own default import file; never the archive's.
+    const written = await readFile(
+      join(editor.dir, "addons/imp/m.gltf.import"),
+      "utf8",
+    ).catch(() => "");
+    expect(written).not.toContain("post.gd");
+    const info = await ok("get_project_info");
+    expect(
+      info.plugins.find((p: { name: string }) => p.name === "imp")?.enabled,
+    ).toBe(false);
+    await expect(lstat(join(editor.dir, "imp_marker.txt"))).rejects.toThrow();
+  }, 60_000);
+
   test("a 2 GB declared entry is refused before extraction, without the memory", async () => {
     const status = async () =>
       Number(
@@ -613,24 +697,42 @@ describe("install_asset as a job", () => {
   }, 60_000);
 });
 
+// Last: once a .gdextension is in the project, the next scan loads it and reloads every editor script.
 describe("install_asset with native code", () => {
-  // Loading a new .gdextension at the scan makes the editor reload every GDScript, which cancels the
-  // running handler, so native code is refused even with allowNativeCode.
-  test("a .gdextension or a shared library gives NATIVE_CODE, with or without allowNativeCode", async () => {
-    const extension = publish(
-      zip([{ name: "addons/n/n.gdextension", data: "[configuration]\n" }]),
+  test("native code gives NATIVE_CODE without allowNativeCode, with nothing written", async () => {
+    for (const entries of [
+      [{ name: "addons/n/n.gdextension", data: "[configuration]\n" }],
+      [{ name: "addons/m/bin/libm.so.1", data: "x" }],
+      [{ name: "addons/f/bin/f.framework/f", data: "x" }],
+    ])
+      expect(await refused({ assetId: publish(zip(entries)) })).toBe(
+        "NATIVE_CODE",
+      );
+  }, 60_000);
+
+  test("allowNativeCode installs it, skips the scan, and frees the job slot", async () => {
+    const extension = '[configuration]\nentry_symbol = "n_init"\n';
+    const id = publish(
+      zip([
+        { name: "addons/n/n.gdextension", data: extension },
+        { name: "addons/n/bin/libn.so", data: "not a library" },
+      ]),
     );
-    const shared = publish(
-      zip([{ name: "addons/m/bin/libm.so.1", data: "x" }]),
-    );
-    const framework = publish(
-      zip([{ name: "addons/f/bin/f.framework/f", data: "x" }]),
-    );
-    for (const id of [extension, shared, framework])
-      for (const allowNativeCode of [false, true])
-        expect(await refused({ assetId: id, allowNativeCode })).toBe(
-          "NATIVE_CODE",
-        );
+    const result = await ok("install_asset", {
+      assetId: id,
+      allowNativeCode: true,
+    });
+    expect(result).toMatchObject({
+      addons: ["n"],
+      nativeCode: true,
+      files: 2,
+      diagnostics: [],
+    });
+    expect(result.warnings).toHaveLength(1);
+    expect(
+      await readFile(join(editor.dir, "addons/n/n.gdextension"), "utf8"),
+    ).toBe(extension);
+    expect((await ok("get_project_info")).jobActive).toBe(false);
   }, 60_000);
 });
 

@@ -21,6 +21,8 @@ const EOCD_BYTES := 22
 const ZIP64_LOCATOR_SIGNATURE := 0x07064b50
 const ENTRY_SIGNATURE := 0x02014b50
 const ENTRY_BYTES := 46
+const LOCAL_SIGNATURE := 0x04034b50
+const LOCAL_BYTES := 30
 # minizip looks this far back from the end for the end record and for a zip64 locator.
 const MAX_COMMENT_BYTES := 0xffff
 const ZIP64_EXTRA := 0x0001
@@ -81,12 +83,13 @@ static func parse(file_path: String) -> Dictionary:
 	var directory := file.get_buffer(directory_size)
 	if directory.size() != directory_size:
 		return _unsafe("its central directory is truncated")
-	return _read_entries(directory, count, directory_offset)
+	return _read_entries(file, directory, count, directory_offset)
 
 
-static func _read_entries(directory: PackedByteArray, count: int, directory_offset: int) -> Dictionary:
+static func _read_entries(file: FileAccess, directory: PackedByteArray, count: int, directory_offset: int) -> Dictionary:
 	var entries: Array[Dictionary] = []
 	var total := 0
+	var total_compressed := 0
 	var at := 0
 	for index in count:
 		if at + ENTRY_BYTES > directory.size() or directory.decode_u32(at) != ENTRY_SIGNATURE:
@@ -117,8 +120,18 @@ static func _read_entries(directory: PackedByteArray, count: int, directory_offs
 			return _unsafe("%s uses compression method %d; only stored and deflate are read" % [label, method])
 		if compressed == 0xffffffff or size == 0xffffffff or local_offset == 0xffffffff or _has_zip64_extra(extra):
 			return _unsafe("%s is a zip64 entry" % label)
-		if start_disk != 0 or local_offset >= directory_offset:
+		if start_disk != 0 or local_offset + LOCAL_BYTES > directory_offset:
 			return _unsafe("%s points outside the archive" % label)
+		# The data must fit between its local header and the central directory, so a lying compressed
+		# size can't defeat the ratio rule.
+		file.seek(local_offset)
+		var local := file.get_buffer(LOCAL_BYTES)
+		if local.decode_u32(0) != LOCAL_SIGNATURE:
+			return _unsafe("%s has no local header" % label)
+		var data_end := local_offset + LOCAL_BYTES + local.decode_u16(26) + local.decode_u16(28) + compressed
+		total_compressed += compressed
+		if data_end > directory_offset or total_compressed > directory_offset:
+			return _unsafe("%s declares more compressed data than the archive holds" % label)
 		var mode_type := (attributes >> 16) & MODE_TYPE
 		if mode_type == MODE_LINK:
 			return _unsafe("%s is a symbolic link" % label)

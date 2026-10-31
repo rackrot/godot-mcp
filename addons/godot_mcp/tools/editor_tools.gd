@@ -113,7 +113,7 @@ func get_editor_log(arguments: Dictionary, _request: Request) -> Variant:
 func play_scene(arguments: Dictionary, request: Request) -> Variant:
 	# Playing makes the editor run its own MSBuild, which would compete with a build_dotnet job.
 	if _job_active.call():
-		return ToolError.fail("PROJECT_BUSY", "A job (run_headless, import_assets or build_dotnet) is running; retry when get_project_info reports jobActive false")
+		return ToolError.fail("PROJECT_BUSY", "A job (run_headless, import_assets, build_dotnet or install_asset) is running; retry when get_project_info reports jobActive false")
 	var mode: String = arguments["mode"]
 	# Running makes the editor save every modified scene, bypassing save_scene's checks.
 	for unsaved in EditorInterface.get_unsaved_scenes():

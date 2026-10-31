@@ -140,6 +140,7 @@ func _install(arguments: Dictionary) -> Dictionary:
 		"plugins": plan["plugins"],
 		"files": plan["files"],
 		"needsDotnetBuild": plan["needsDotnetBuild"],
+		"nativeCode": plan["nativeCode"],
 		"backups": swapped["backups"],
 		"warnings": _warnings,
 	}
@@ -338,6 +339,8 @@ func _plan(arguments: Dictionary) -> Dictionary:
 	var addons := {}
 	var plugins: Array[String] = []
 	var native: Array[String] = []
+	var has_native := false
+	var imports: Array[String] = []
 	var needs_dotnet := false
 	var files := 0
 	var skipped := 0
@@ -352,13 +355,21 @@ func _plan(arguments: Dictionary) -> Dictionary:
 			continue
 		if addon.to_lower() == PROTECTED_ADDON:
 			return ToolError.fail("PROTECTED_PATH", "The archive holds addons/%s, which install_asset never replaces" % addon)
+		var lower := relative.to_lower()
+		# An asset's .import file sets the importer's parameters, and the final scan reimports with them:
+		# import_script/path, nodes/root_script and the like run the asset's scripts in the editor before
+		# this call returns. The editor writes default import files for the assets instead.
+		if not entry["dir"] and lower.ends_with(".import"):
+			imports.append("addons/" + relative)
+			continue
 		var inner := relative.substr(addon.length() + 1)
 		var item := entry.duplicate()
 		item["inner"] = inner
 		addons.get_or_add(addon, []).append(item)
-		var lower := relative.to_lower()
-		if _is_native(lower) and native.size() < MAX_NATIVE_LISTED:
-			native.append("addons/" + relative)
+		if _is_native(lower):
+			has_native = true
+			if native.size() < MAX_NATIVE_LISTED:
+				native.append("addons/" + relative)
 		if entry["dir"]:
 			continue
 		files += 1
@@ -368,18 +379,17 @@ func _plan(arguments: Dictionary) -> Dictionary:
 			plugins.append(relative.get_base_dir())
 	if skipped > 0:
 		_warnings.append("%d file(s) directly in addons/ belong to no addon folder and were not installed" % skipped)
+	if not imports.is_empty():
+		_warnings.append("Skipped %d .import file(s), which could run the asset's scripts at import; the editor writes its own: %s" % [imports.size(), ", ".join(imports.slice(0, MAX_NATIVE_LISTED))])
 	if addons.is_empty():
 		return ToolError.fail("INCOMPATIBLE_ASSET", "The archive's addons/ folder holds no addon folder")
-	# Refused even with allowNativeCode: the scan that loads a new .gdextension (even one whose library
-	# is missing) makes the editor reload every GDScript, which cancels this handler mid-await, so the call
-	# never answers and the job slot stays taken until the editor restarts (verified on 4.7.2).
-	if not native.is_empty():
-		return ToolError.fail("NATIVE_CODE", "The archive holds native code: %s. install_asset does not install native code, even with allowNativeCode: the editor loads it at its next scan, and that load reloads every editor script, which would cancel this call. Install it by hand in the editor" % ", ".join(native))
+	if has_native and not arguments.get("allowNativeCode", false):
+		return ToolError.fail("NATIVE_CODE", "The archive holds native code, which the editor loads at its next scan: %s. Pass allowNativeCode: true to install it" % ", ".join(native))
 	var targets := _check_targets(addons.keys(), arguments.get("overwrite", false))
 	if targets.has("error"):
 		return targets
 	plugins.sort()
-	return {"addons": addons, "plugins": plugins, "files": files, "needsDotnetBuild": needs_dotnet}
+	return {"addons": addons, "plugins": plugins, "files": files, "needsDotnetBuild": needs_dotnet, "nativeCode": has_native}
 
 
 # "addons/" when the archive has it at its root, "<top>/addons/" when every entry is under one top
